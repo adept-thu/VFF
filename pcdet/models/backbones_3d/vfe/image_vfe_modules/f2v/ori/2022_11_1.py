@@ -4,11 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import matplotlib
-from mmcv.ops import ball_query
-# from mmcv.ops import knn
-
-
 
 
 from .point_to_image_projection import Point2ImageProjection
@@ -43,7 +38,7 @@ class VoxelFieldFusion(nn.Module):
                                                      stride_dict=self.fuse_stride,
                                                      fuse_layer=model_cfg.LAYER_CHANNEL.keys())
         self.voxel_size = ((self.pc_range[1] - self.pc_range[0]) / tensor_grid_size)
-        # self.pool = nn.AdaptiveAvgPool1d(3)
+        self.pool = nn.AdaptiveAvgPool1d(3)
         if 'ray' in self.fuse_mode:
             # 初始化参数
             self.fuse_thres = model_cfg.get('FUSE_THRES', 0.5)
@@ -56,8 +51,6 @@ class VoxelFieldFusion(nn.Module):
 
             # MLP
             self.ray_blocks = nn.ModuleDict()
-            #TODO 
-            self.pos_blocks = nn.ModuleDict()
             self.img_blocks = nn.ModuleDict()
             self.sample_blocks = nn.ModuleDict()
             self.fuse_blocks = nn.ModuleDict()
@@ -79,8 +72,6 @@ class VoxelFieldFusion(nn.Module):
             for _layer in model_cfg.LAYER_CHANNEL.keys():  # 对每一层
                 # 射线、图像、可学习采样都是OrderedDict形式
                 ray_block = OrderedDict()
-                #TODO pos_block
-                pos_block = OrderedDict()
                 img_block = OrderedDict()
                 sample_blocks = OrderedDict()
 
@@ -96,9 +87,6 @@ class VoxelFieldFusion(nn.Module):
                     img_in_channel += 2  # 3+2=5
                 for _block in range(self.block_num):  # 每一层的各个块（3块）
                     ray_block['ray_{}_conv_{}'.format(_layer, _block)] = nn.Linear(in_features=ray_in_channel,
-                                                                                   out_features=out_channel,
-                                                                                   bias=True)
-                    pos_block['ray_{}_conv_{}'.format(_layer, _block)] = nn.Linear(in_features=3,
                                                                                    out_features=out_channel,
                                                                                    bias=True)
                     img_block['img_{}_conv_{}'.format(_layer, _block)] = nn.Conv2d(in_channels=img_in_channel,
@@ -117,7 +105,6 @@ class VoxelFieldFusion(nn.Module):
                             bias=True)
                     if _block < self.block_num - 1:
                         ray_block['ray_{}_relu_{}'.format(_layer, _block)] = nn.ReLU()
-                        pos_block['ray_{}_relu_{}'.format(_layer, _block)] = nn.ReLU()
                         img_block['img_{}_bn_{}'.format(_layer, _block)] = nn.BatchNorm2d(out_channel)
                         img_block['img_{}_relu_{}'.format(_layer, _block)] = nn.ReLU()
                         if "learnable" in self.ray_sample.METHOD:
@@ -132,11 +119,6 @@ class VoxelFieldFusion(nn.Module):
                     nn.init.normal_(ray_block[_ray].weight, mean=0, std=0.01)
                     if ray_block[_ray].bias is not None:
                         nn.init.constant_(ray_block[_ray].bias, 0)
-                for _pos in pos_block:
-                    if 'relu' in _pos or 'bn' in _pos: continue
-                    nn.init.normal_(pos_block[_pos].weight, mean=0, std=0.01)
-                    if pos_block[_pos].bias is not None:
-                        nn.init.constant_(pos_block[_ray].bias, 0)                
                 for _img in img_block:
                     if 'relu' in _img or 'bn' in _img: continue
                     nn.init.normal_(img_block[_img].weight, mean=0, std=0.01)
@@ -152,7 +134,6 @@ class VoxelFieldFusion(nn.Module):
 
                 #  三个embeding层，都是MLP
                 self.ray_blocks[_layer] = nn.Sequential(ray_block)
-                self.pos_blocks[_layer] = nn.Sequential(pos_block)
                 self.img_blocks[_layer] = nn.Sequential(img_block)
                 self.fuse_blocks[_layer] = nn.Sequential(nn.Linear(in_features=out_channel * 2,
                                                                    out_features=out_channel,
@@ -195,6 +176,19 @@ class VoxelFieldFusion(nn.Module):
         dist += torch.sum(dst.float()** 2, -1).view(B, 1, M)
         return dist
 
+    def knn_point(self, nsample, xyz, new_xyz):
+        """
+        Input:
+            nsample: max sample number in local region
+            xyz: all points, [B, N, C]
+            new_xyz: query points, [B, S, C]
+        Return:
+            group_idx: grouped points index, [B, S, nsample]
+        """
+        sqrdists = self.square_distance(new_xyz, xyz)
+        dist_2, group_idx = torch.topk(sqrdists, nsample, dim=-1, largest=False, sorted=False)
+        return dist_2, group_idx
+
     def index_points(self, points, idx):
         """
         Input:
@@ -212,17 +206,73 @@ class VoxelFieldFusion(nn.Module):
         repeat_shape[0] = 1
         # batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
         batch_indices = torch.arange(B, dtype=torch.long).view(view_shape).repeat(repeat_shape)
-        new_points = points[batch_indices, idx.long(), :]
+        new_points = points[batch_indices, idx, :]
         return new_points
 
-    def fill(self, k, encoded_voxel_batch, select_voxel_batch):
-        dist, neighbor_idx = self.knn_point(k, encoded_voxel_batch, select_voxel_batch)  # B,N_idx,XYZ
+    # def query_ball_point(self, radius, nsample, xyz, new_xyz):
+    #     """
+    #     Input:
+    #         radius: local region radius
+    #         nsample: max sample number in local region
+    #         xyz: all points, [B, N, 3]
+    #         new_xyz: query points, [B, S, 3]
+    #     Return:
+    #         group_idx: grouped points index, [B, S, nsample]
+    #     """
+    #     device = xyz.device
+    #     B, N, C = xyz.shape
+    #     _, S, _ = new_xyz.shape
+    #     group_idx = torch.arange(N, dtype=torch.long).to(device).view(1, 1, N).repeat([B, S, 1])
+    #     sqrdists = self.square_distance(new_xyz, xyz)
+    #     group_idx[sqrdists > radius ** 2] = N
+    #     group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
+    #     group_first = group_idx[:, :, 0].view(B, S, 1).repeat([1, 1, nsample])
+    #     mask = group_idx == N
+    #     group_idx[mask] = group_first[mask]
+    #     return group_idx
+
+    def fill(self, k, encoded_voxel_batch, render_indices_batch):
+        dist, neighbor_idx = self.knn_point(k, encoded_voxel_batch, render_indices_batch)  # B,N_idx,XYZ
         
         grouped_encoded_voxel_for_each_render_point = self.index_points(encoded_voxel_batch,
                                                                         neighbor_idx)  # B,N,k
         
+        # if grouped_encoded_voxel_for_each_render_point == torch.Size([]):
+        #   print("this tensor is empty")
+
+        # import pdb
+        # pdb.set_trace()
+        # print(grouped_encoded_voxel_for_each_render_point.shape)
+
+        # relative_pos = grouped_encoded_voxel_for_each_render_point - render_indices_batch.unsqueeze(2).repeat(1,1,k,1)
+
+        # 判断离群点
+        # thresh = 3
+        # relative_dist = dist_2.sqrt()  #B N K
+        # relative_dist1 = torch.cat((relative_dist, relative_dist[:, :, -1:]), 1)  # 补充最后一行
+        # relative_dist2 = torch.cat((relative_dist[:, :, :1], relative_dist), 1)  # 补充第一行
+        # d_relative_dist = (relative_dist1 - relative_dist2)
+        # # 用于去掉离群点的mask
+        # inside_mask = (d_relative_dist < thresh)[:, :, :-1]
+        # # 用于去掉离群点
+        # grouped_encoded_voxel_for_each_render_point = grouped_encoded_voxel_for_each_render_point.masked_fill(~inside_mask, 0)
+        # # 去掉离群点后的最远点
+        # grouped_encoded_voxel_for_each_render_point_max = torch.max(grouped_encoded_voxel_for_each_render_point,
+        #                                                             dim=2, keepdim=True)[0]
+        # # 用去掉离群点后的最远点，填补离群点的空位
+        # grouped_encoded_voxel_for_each_render_point.masked_fill(~inside_mask, grouped_encoded_voxel_for_each_render_point_max)
+        # # while grouped_encoded_voxel_for_each_render_point.size(2) < relative_dist.size(-1):
+
+        # box
+
         max_pos = torch.max(grouped_encoded_voxel_for_each_render_point, dim=2)[0]  # BN3
         min_pos = torch.min(grouped_encoded_voxel_for_each_render_point, dim=2)[0]  # BN3
+        
+
+
+        # 判断方向
+        # dir_deci = torch.sum(torch.clamp(relative_pos, min=0), dim=-2, keepdim=False)/\
+        #            (torch.sum(torch.clamp(-relative_pos, min=0), dim=-2, keepdim=False))  # B,N,3
 
         return max_pos, min_pos
 
@@ -275,9 +325,9 @@ class VoxelFieldFusion(nn.Module):
             else:
                 image_feat = encoded_feat2d[_idx]
             # TODO                
-            # image_feat_npy = image_feat[0,:,:].detach().cpu().numpy()
-            # import matplotlib
-            # matplotlib.image.imsave('/home/zhanghaoming/visual/input_image.png', image_feat_npy)
+            image_feat_npy = image_feat[0,:,:].detach().cpu().numpy()
+            import matplotlib
+            matplotlib.image.imsave('/home/zhanghaoming/visual/name.png', image_feat_npy)
             # raw_shape指每一层下采样后的大小
             raw_shape = tuple(batch_dict['image_shape'][_idx].cpu().numpy() // self.fuse_stride[layer_name])
             feat_shape = image_feat.shape[-2:]
@@ -290,7 +340,6 @@ class VoxelFieldFusion(nn.Module):
             image_grid = projection_dict['image_grid'][_idx]  # encoded_voxel投影在格子上的xy坐标 (B,N,2)
             point_mask = projection_dict['point_mask'][_idx]  # 每个batch的点被置1 
             image_depth = projection_dict['image_depths'][_idx]  # 点投影在格子上的深度
-            point_inv = projection_dict['point_inv'][_idx]  # 真实点的lidar坐标
 
             # Fuse 3D LiDAR point with 2D image feature
             # point_mask[len(voxel_feat):] -> 0 for batch construction
@@ -318,7 +367,6 @@ class VoxelFieldFusion(nn.Module):
             # voxel_feat[voxel_mask]和image_grid[point_mask]时一一对应的关系
             
             encoded_voxel.features[index_mask] = voxel_feat
-            # TODO在这里加入了坐标与feat融合
             # 这一batch的信息融合结束 encoded_voxel.features(N,C)
 
             # Predict 3D Ray from 2D image feature
@@ -328,7 +376,7 @@ class VoxelFieldFusion(nn.Module):
                 ray_depth = projection_dict['ray_depths'][_idx]  # grid生成的深度图像的深度
                 ray_mask = ray_mask & (ray_depth < self.depth_thres)
                 ray_voxel = projection_dict['voxel_grid'][_idx][ray_mask]  # mask切割后的gird三维坐标 N, ZYX
-                ray_grid = projection_dict['ray_grid'][_idx][ray_mask]  # mask切割后的grid生成的深度图,ray_grid 是voxel块（体素场）在图片上的投影
+                ray_grid = projection_dict['ray_grid'][_idx][ray_mask]  # mask切割后的grid生成的深度图
                 lidar_grid = projection_dict['lidar_grid'][_idx][ray_mask]  # mask切割后的grid生成的lidar坐标系下的坐标
 
                 # Get shape of render voxel and grid
@@ -364,36 +412,18 @@ class VoxelFieldFusion(nn.Module):
                 ray_logit：不加sigmoid的grid_prob
                 sample_mask：可学习的采样法中，获得较高得分的，体素投影到图片的点的mask
                 ray_mask：ray_prob(omega_j)得分较高的投影点的mask
-                grid_prob：可学习采样法得到的图片上的像素的分数           
+                grid_prob：图片特征中每个像素-点响应,对应公式三中的omega_j           
                 """
-                render_feat, ray_logit, sample_mask, ray_mask, grid_prob, sample_encoded_mask = self.ray_render(ray_grid, lidar_grid,
+                render_feat, ray_logit, sample_mask, ray_mask, grid_prob, grid_feat = self.ray_render(ray_grid, lidar_grid,
                                                                                            image_grid[point_mask],
                                                                                            image_feat.unsqueeze(0),
                                                                                            render_shape, layer_name,
                                                                                            topk_num,
-                                                                                           voxel_indices = voxel_indices,
                                                                                            encoded_voxel_feat = voxel_feat[voxel_mask])
 
                 # Find the pair of rendered voxel and orignial voxel
                 render_indices = ray_voxel[sample_mask][ray_mask][:, [2, 1, 0]].long()  # 被选出的voxel的grid坐标 N,XYZ
-                # np.savetxt('/home/zhanghaoming/visual/np_render_indices.txt', render_indices.cpu().numpy())
                 # 被选出的voxel中是否包含encoded_voxel，若包含，置1，生成render_mask
-                # TODO
-                voxel_indices_select= voxel_indices[voxel_mask][sample_encoded_mask]
-                voxel_feat_select = voxel_feat[voxel_mask][sample_encoded_mask]
-
-##########################TODO
-                # 这一batch中所有点的坐标(N,XYZ)         
-                k = 8 //self.fuse_stride[layer_name]
-                r = 10 //self.fuse_stride[layer_name]
-                if render_indices.size(0) !=0 and voxel_indices_select.size(0) !=0:
-                    ball_index = ball_query(0,r,k,render_indices.unsqueeze(0).float(),voxel_indices_select.unsqueeze(0).float())
-                    render_indices  = self.index_points(render_indices.unsqueeze(0),ball_index).squeeze(0).reshape(-1,3)
-                    # render_feat = self.index_points(render_feat.unsqueeze(0),ball_index).squeeze(0).reshape(-1,render_feat.size(-1)) # 真实xyz的坐标对应的特征
-                    render_feat = (voxel_feat_select.repeat(1,k,1) *   
-                                    (self.index_points(render_feat.unsqueeze(0),ball_index).squeeze(0))).reshape(-1,render_feat.size(-1))
-##########################
-
                 render_mask = judge_voxel[render_indices[:, 0], render_indices[:, 1], render_indices[:, 2]].bool()
                 judge_voxel = judge_voxel * 0
 
@@ -404,50 +434,105 @@ class VoxelFieldFusion(nn.Module):
                 # 条件1：voxel被ray_render筛选出来
                 # 条件2：筛选出来的voxel中含被选出的voxel中是否包含encoded_voxel
                 voxel_mask = judge_voxel[voxel_indices[:, 0], voxel_indices[:, 1], voxel_indices[:, 2]].bool()
+                np.savetxt('/home/zhanghaoming/visual/np_render_mask.txt',render_mask.cpu().numpy())
 
                 # Add rendered point to Sparse Tensor
                 render_indices = render_indices[~render_mask].int()  # 选出不包含encoded_voxel点的voxel的坐标
-                render_feat = render_feat[~render_mask]  # 选出不包含encoded_voxel的voxel的特征
-                # vis
-                # np.savetxt('/home/zhanghaoming/visual/np_ball_render.txt',render_indices.reshape(-1,3).cpu().numpy())
-                # np.savetxt('/home/zhanghaoming/visual/np_encoded_voxel.txt', voxel_indices.cpu().numpy())
-                # np.savetxt('/home/zhanghaoming/visual/np_foreground_voxel.txt',voxel_indices_select.cpu().numpy())
+                #TODO
 
+                render_feat = render_feat[~render_mask]  # 选出不包含encoded_voxel的voxel的特征
+                np_render_indices = render_indices.cpu().numpy()
+                np_encoded_voxel = voxel_indices.cpu().numpy()
+                np.savetxt('/home/zhanghaoming/visual/np_render_indices2.txt',np_render_indices)
+                np.savetxt('/home/zhanghaoming/visual/np_encoded_voxel2.txt',np_encoded_voxel)
+                
                 if layer_name == 'layer1' or layer_name == 'layer2': # TODO
-                # _idx之的是batch的idx 
-                    if render_indices.size(0) !=0 and voxel_indices_select.size(0) !=0:  
-                        render_batch = _idx * torch.ones(len(render_indices), 1).to(device=render_indices.device).int()
-                        # 给render_indices(xyz)加上batch编号
-                        render_indices = torch.cat([render_batch, render_indices], dim=1)
-                        # 把ray_render筛选出来的新的带有特征的voxel加入到encoded_voxel里
-                        encoded_voxel.indices = torch.cat([encoded_voxel.indices, render_indices], dim=0)
-                        # encoded_voxel.features = torch.cat([encoded_voxel.features, render_feat], dim=0)
-                        encoded_voxel=encoded_voxel.replace_feature(torch.cat([encoded_voxel.features, render_feat], dim=0))
+                    if render_indices.size(0) !=0 & render_feat.size(0) !=0:
+    ##########################
+                    # 这一batch中所有点的坐标(N,XYZ)
+                        encoded_voxel_batch = voxel_indices.unsqueeze(0).to(device=render_indices.device)  # B,N_idx,XYZ
+                        render_indices_batch = render_indices.unsqueeze(0)
+                        # fill函数筛选出每个虚拟点的可扩展范围
+                        k = 3  # 邻居点数
+                        
+                        max_pos, min_pos = self.fill(k, encoded_voxel_batch, render_indices_batch)
+                        max_pos = max_pos.squeeze(0)  # N,3
+                        min_pos = min_pos.squeeze(0)  # N,3
+                        # fill函数筛选出每个虚拟点的可扩展范围
+                        # ray_voxel N,ZYX
+                        new_ray_voxel_int = ray_voxel[:, [2, 1, 0]]
+                        new_ray_voxel = ray_voxel[:, [2, 1, 0]].long()  # new_ray_voxel N,XYZ
+                        for n in range(max_pos.size(0)):
+                            # fill_mask = (new_ray_voxel_int[:, 0] == torch.linspace(min_pos[n,0],max_pos[n,0],4)[1:-1].int())\
+                            #     & (new_ray_voxel_int[:, 1] == torch.linspace(min_pos[n,1],max_pos[n,1],4)[1:-1].int()) \
+                            #     & (new_ray_voxel_int[:, 2] == torch.linspace(min_pos[n,2],max_pos[n,2],4)[1:-1].int())
+                            """
+                            fill_mask = (new_ray_voxel[:, 0] <= max_pos[n, 0]) & (new_ray_voxel[:, 0] >= min_pos[n, 0])\
+                                        & (new_ray_voxel[:, 1] <= max_pos[n, 1]) & (new_ray_voxel[:, 1] >= min_pos[n, 1])\
+                                        & (new_ray_voxel[:, 2] <= max_pos[n, 2]) & (new_ray_voxel[:, 2] >= min_pos[n, 2])
+                            """
+                            X, Y, Z = torch.meshgrid(torch.linspace(min_pos[n,0],max_pos[n,0],4)[1:-1].int(),
+                                                    torch.linspace(min_pos[n,1],max_pos[n,1],4)[1:-1].int(),
+                                                    torch.linspace(min_pos[n,2],max_pos[n,0],2)[1:-1].int())
+                            fill_voxel = torch.cat([X.unsqueeze(-1),Y.unsqueeze(-1),Z.unsqueeze(-1)],dim = -1).view(-1,3)
+                            fill_voxel_feat = fill_voxel * self.voxel_size + self.pc_range[0]
+                            # fill_voxel_feat = new_ray_voxel[fill_mask]
+                            
+                            fill_voxel = fill_voxel.transpose(0,1).unsqueeze(0).float()
+                            # if fill_voxel.shape[-1] != 0:
+                            #     fill_voxel = self.pool(fill_voxel).squeeze(0).transpose(0,1).int()
+                            # fill_voxel_feat = lidar_grid[fill_mask]
+                            # if fill_voxel_feat.shape[-1] != 0:
+                            #     fill_voxel_feat = self.pool(fill_voxel_feat.transpose(0,1).unsqueeze(0)).squeeze(0).transpose(0,1)
+                            
+
+                            # 对扩展虚拟点的lidar空间位置信息进行编码
+                            fill_voxel_feat = self.ray_blocks[layer_name](fill_voxel_feat)
+                            
+
+                            render_batch = _idx * torch.ones(len(fill_voxel), 1).to(device=render_indices.device).int()
+                            fill_voxel = torch.cat([render_batch, fill_voxel], dim=1)
+                            # fill_voxel_feat= torch.cat([render_batch, fill_voxel_feat], dim=1)
+                            # 把ray_render新的带有特征的扩展虚拟点voxel加入到encoded_voxel里
+
+                            encoded_voxel.indices = torch.cat([encoded_voxel.indices, fill_voxel], dim=0)
+                            # encoded_voxel.features = torch.cat([encoded_voxel.features, fill_voxel_feat], dim=0)
+                            encoded_voxel=encoded_voxel.replace_feature(torch.cat([encoded_voxel.features, fill_voxel_feat], dim=0))
+                            # encoded_voxel = encoded_voxel.replace_feature(new_encoded_voxel_feat)
+                            # print("ok")
+
+                # _idx之的是batch的idx
+                render_batch = _idx * torch.ones(len(render_indices), 1).to(device=render_indices.device).int()
+                # 给render_indices(xyz)加上batch编号
+                render_indices = torch.cat([render_batch, render_indices], dim=1)
+                # 把ray_render筛选出来的新的带有特征的voxel加入到encoded_voxel里
+                encoded_voxel.indices = torch.cat([encoded_voxel.indices, render_indices], dim=0)
+                # encoded_voxel.features = torch.cat([encoded_voxel.features, render_feat], dim=0)
+                encoded_voxel=encoded_voxel.replace_feature(torch.cat([encoded_voxel.features, render_feat], dim=0))
+
                 if not self.training:
                     continue
 
-                # Find the points in GT ray(这一段就是找出投影在前景区域的真实点)
+                # Find the points in GT ray
                 grid_mask = torch.zeros(tuple(render_shape[0].cpu().numpy())).to(device=image_grid.device)
                 grid_mask[image_grid[point_mask][:, 0], image_grid[point_mask][:, 1]] = 1  # 点投影到图片上的像素置1
-                # （这句话写的不好，看上面的注释）即是点投影到图片上的像素，又是ray_render筛选出来的voxel投影得到的像素，设置为identity_mask
+                # 即是点投影到图片上的像素，又是ray_render筛选出来的voxel投影得到的像素，设置为identity_mask
                 identity_mask = grid_mask[ray_grid[sample_mask][:, 0], ray_grid[sample_mask][:, 1]].bool()
 
                 # Find the pair of rendered voxel and orignial voxel
-                # 以一个encoded_voxel为中心形成3D高斯场（是否可以改成只在前景点上生成高斯场）
+                # 以一个encoded_voxel为中心形成3D高斯场
                 judge_voxel = judge_voxel * 0
                 if self.kernel_size > 1:
                     judge_voxel = self.gaussian3D(judge_voxel, voxel_indices)
                 else:
                     judge_voxel[voxel_indices[:, 0], voxel_indices[:, 1], voxel_indices[:, 2]] = 1
 
-                # 这一步要选出满足如下条件的点（作为真值）
-                # 该点的投影属于前景点，且在射线上
+                #
                 render_indices = ray_voxel[sample_mask][identity_mask][:, [2, 1, 0]].long()
-                # np.savetxt('/home/zhanghaoming/visual/identity_mask.txt', render_indices.cpu().numpy())
                 render_mask = judge_voxel[render_indices[:, 0], render_indices[:, 1], render_indices[:, 2]].float()
 
                 if identity_mask.sum() > 0:
-                    ray_logit = ray_logit[identity_mask]  # 用identity_mask筛选出voxel的分数
+                    ray_logit = ray_logit[identity_mask]  # 用identity_mask筛选出带有得分的voxel
                 else:
                     # Avoid Loss Nan
                     ray_logit = ray_logit.sum()[None] * 0
@@ -495,7 +580,121 @@ class VoxelFieldFusion(nn.Module):
 
         return encoded_voxel, batch_dict
 
-    def ray_render(self, ray_grid, ray_feat, image_grid, image_feat, shape, layer_name, topk_num,voxel_indices =None, encoded_voxel_feat = None, min_n=-1, max_n=1):
+    # def ray_render(self, ray_grid, ray_feat, image_grid, image_feat, shape, layer_name, topk_num, min_n=-1, max_n=1):
+    #     """
+    #     Args:
+    #         ray_grid:  lidar_grid投影在图片上的坐标
+    #         ray_feat: lidar 坐标
+    #         image_grid: 点投影在图片上的xy坐标
+    #         image_feat:  图片本身的特征(C, H, W), Encoded image features
+    #         shape: 图片大小
+    #         layer_name:
+    #         topk_num:
+    #         min_n:
+    #         max_n:
+
+    #     Returns:
+
+    #     """
+    #     grid_prob = None
+    #     window_size = self.ray_sample.WINDOW // self.fuse_stride[layer_name]  # self.ray_sample.WINDOW=64
+    #     # .ceil()向上取整
+    #     grid_x = torch.arange(0, ((shape[0, 0] / window_size).ceil() + 1) * window_size + 1, step=window_size)  # 网格x轴
+    #     range_x = torch.stack([grid_x[:-1], grid_x[1:] - 1]).transpose(0, 1).to(device=image_grid.device)  # 网格x轴范围
+    #     grid_y = torch.arange(0, ((shape[0, 1] / window_size).ceil() + 1) * window_size + 1, step=window_size)  # 网格y轴
+    #     range_y = torch.stack([grid_y[:-1], grid_y[1:] - 1]).transpose(0, 1).to(device=image_grid.device)  # 网格y轴范围
+    #     # 根据点投影在图片上的坐标作出mask
+    #     mask_x = (image_grid[:, 0][None, :] >= range_x[:, 0][:, None]) & \
+    #              (image_grid[:, 0][None, :] <= range_x[:, 1][:, None])  # 网格切割出的图像x轴范围
+    #     mask_y = (image_grid[:, 1][None, :] >= range_y[:, 0][:, None]) & \
+    #              (image_grid[:, 1][None, :] <= range_y[:, 1][:, None])  # 网格切割出的图像y轴范围
+    #     grid_mask = mask_x[:, None, :] & mask_y[None, :, :]
+    #     grid_count = grid_mask.sum(-1)  # 网格数
+
+    #     if "uniform" in self.ray_sample.METHOD:
+    #         sample_num = len(image_grid) * self.ray_sample.RATIO
+    #         grid_count = (grid_count > 0) * sample_num // (grid_count > 0).sum()
+    #     elif "density" in self.ray_sample.METHOD:
+    #         grid_count = grid_count * self.ray_sample.RATIO
+    #     elif "sparsity" in self.ray_sample.METHOD:
+    #         sample_count = grid_count[grid_count > 0]
+    #         sample_num, sample_idx = (sample_count * self.ray_sample.RATIO).sort()
+    #         sample_count[sample_idx] = sample_num.long().flip(0)
+    #         grid_count[grid_count > 0] = sample_count
+
+    #     if "all" in self.ray_sample.METHOD:
+    #         grid_sample = torch.ones(grid_count.shape[0] * window_size, grid_count.shape[1] * window_size).bool().to(
+    #             device=image_grid.device)
+    #     else:
+    #         grid_sample = torch.rand(*grid_count.shape, window_size, window_size).to(device=image_grid.device)
+    #         grid_ratio = grid_count / (window_size ** 2)  # 网格数/图片大小
+    #         grid_sample = grid_sample < grid_ratio[..., None, None]
+    #         grid_sample = grid_sample.permute(0, 2, 1, 3)
+    #         grid_sample = grid_sample.reshape(grid_sample.shape[0] * window_size, -1)
+
+    #     if "learnable" in self.ray_sample.METHOD:  # 可学习的采样法
+    #         grid_prob = self.sample_blocks[layer_name](image_feat)  # sample_blocks是一个2d卷积
+    #         # grid_mask 指图片特征经过MLP后grid_prob大于阈值的点,阈值为0.5
+    #         grid_mask = (grid_prob.sigmoid() > self.ray_sample.THRES).squeeze()
+    #         grid_mask_npy = grid_mask.int().float().detach().cpu().numpy()
+    #         grid_mask = grid_mask.transpose(0, 1)
+    #         # TODO
+    #         import matplotlib
+    #         matplotlib.image.imsave('/home/zhanghaoming/visual/name_mask.png', grid_mask_npy)
+            
+    #         # 用获得高分的grid_prob制成的的grid_mask裁减出用于生成ray的点生成grid_sample，对应公式(2)
+    #         grid_sample[:grid_mask.shape[0], :grid_mask.shape[1]] = grid_mask & grid_sample[:grid_mask.shape[0],
+    #                                                                             :grid_mask.shape[1]]
+
+    #     # sample_mask指的是grid_sample中包含grid投影的点
+    #     sample_mask = grid_sample[ray_grid[:, 0], ray_grid[:, 1]]
+    #     # 从ray_grid选出用于生成ray的点
+    #     # 这些点满足以下条件：1.在图片处理中获得高分的像素 2.有点投影在这些获得高分的像素上
+    #     ray_grid = ray_grid[sample_mask]
+    #     ray_feat = ray_feat[sample_mask]
+
+    #     # Get feature embedding  利用mlp处理grid采样图片中的关键点
+    #     image_feat = self.img_blocks[layer_name](image_feat)
+    #     ray_feat = self.ray_blocks[layer_name](ray_feat)
+
+    #     # Subtract 1 since pixel indexing from [0, shape - 1]
+    #     norm_coords = ray_grid / (shape - 1) * (max_n - min_n) + min_n
+    #     norm_coords = norm_coords.reshape(1, 1, -1, 2)
+    #     # grid_feat此处定义：指的是图片正规化采样后的特征 注意是BNC形状
+    #     grid_feat = F.grid_sample(input=image_feat, grid=norm_coords, mode="bilinear", padding_mode="zeros")
+    #     grid_feat = grid_feat[0, :, 0].transpose(0, 1)  # 得到每个投影点的新特征(N,C)
+    #     ray_logit = (ray_feat * grid_feat).sum(-1)  # ray_feat * grid_feat并按通道相加，
+    #     ray_prob = ray_logit.sigmoid()  # 这里对应公式(3)
+
+    #     if self.training:
+    #         if len(ray_prob) > topk_num:
+    #             ray_topk = torch.topk(ray_prob, topk_num)[1]  # 找到得分最高的前k个ray_prob的idx
+    #             # 用前k个ray_prob的值的idx做出ray_mask
+    #             ray_mask = torch.zeros_like(ray_prob).bool()
+    #             ray_mask[ray_topk] = True
+    #         else:
+    #             ray_mask = torch.ones_like(ray_prob).bool()
+    #     else:  # test模式
+    #         ray_mask = (ray_prob > self.fuse_thres)  # 得分高于阈值的点制作成mask
+    #         if ray_mask.sum() > topk_num:  # 如果得分高于阈值的点多于设定值，进一步筛选
+    #             ray_topk = torch.topk(ray_prob, topk_num)[1]
+    #             top_mask = torch.zeros_like(ray_prob).bool()
+    #             top_mask[ray_topk] = True
+    #             ray_mask = ray_mask & top_mask
+
+    #     # 用ray_mask筛选出得分高的ray_prob的值
+    #     ray_prob = ray_prob[ray_mask]
+
+        
+    #     # 拼接lidar特征和图片特征
+    #     render_feat = torch.cat([ray_feat[ray_mask], grid_feat[ray_mask]], dim=1) #2C
+    #     render_feat = self.fuse_blocks[layer_name](render_feat)
+    #     # MLP把通道数压缩为原来的一半（保证输出的通道与原始通道数相同）
+    #     render_feat = render_feat * ray_prob.unsqueeze(-1)
+
+    #     return render_feat, ray_logit, sample_mask, ray_mask, grid_prob, grid_feat[ray_mask]
+
+    def ray_render(self, ray_grid, ray_feat, image_grid, image_feat, shape, layer_name, topk_num, encoded_voxel_feat = None, min_n=-1, max_n=1):
         """
         Args:
             ray_grid:  lidar_grid投影在图片上的坐标
@@ -511,67 +710,57 @@ class VoxelFieldFusion(nn.Module):
         Returns:
 
         """
-        # 把图片划分成若干个windows（如64*64），在每个windows里取一定数量的点
         grid_prob = None
         window_size = self.ray_sample.WINDOW // self.fuse_stride[layer_name]  # self.ray_sample.WINDOW=64
         # .ceil()向上取整
-        grid_x = torch.arange(0, ((shape[0, 0] / window_size).ceil() + 1) * window_size + 1, step=window_size)  # 网格x轴被划分为 0,64,128...2048
-        range_x = torch.stack([grid_x[:-1], grid_x[1:] - 1]).transpose(0, 1).to(device=image_grid.device)  # 网格x轴每个格子范围 [0,63],[64,127]...
-        grid_y = torch.arange(0, ((shape[0, 1] / window_size).ceil() + 1) * window_size + 1, step=window_size)  # 同理
-        range_y = torch.stack([grid_y[:-1], grid_y[1:] - 1]).transpose(0, 1).to(device=image_grid.device)  # 同理
+        grid_x = torch.arange(0, ((shape[0, 0] / window_size).ceil() + 1) * window_size + 1, step=window_size)  # 网格x轴
+        range_x = torch.stack([grid_x[:-1], grid_x[1:] - 1]).transpose(0, 1).to(device=image_grid.device)  # 网格x轴范围
+        grid_y = torch.arange(0, ((shape[0, 1] / window_size).ceil() + 1) * window_size + 1, step=window_size)  # 网格y轴
+        range_y = torch.stack([grid_y[:-1], grid_y[1:] - 1]).transpose(0, 1).to(device=image_grid.device)  # 网格y轴范围
         # 根据点投影在图片上的坐标作出mask
         mask_x = (image_grid[:, 0][None, :] >= range_x[:, 0][:, None]) & \
-                 (image_grid[:, 0][None, :] <= range_x[:, 1][:, None])  # 每个网格筛选出包含于其中的image_grid
+                 (image_grid[:, 0][None, :] <= range_x[:, 1][:, None])  # 网格切割出的图像x轴范围
         mask_y = (image_grid[:, 1][None, :] >= range_y[:, 0][:, None]) & \
-                 (image_grid[:, 1][None, :] <= range_y[:, 1][:, None])  # 网格筛选出包含于其中的image_grid
+                 (image_grid[:, 1][None, :] <= range_y[:, 1][:, None])  # 网格切割出的图像y轴范围
         grid_mask = mask_x[:, None, :] & mask_y[None, :, :]
-        grid_count = grid_mask.sum(-1)  # 每一个网格中有几个真实点
+        grid_count = grid_mask.sum(-1)  # 网格数
 
         if "uniform" in self.ray_sample.METHOD:
             sample_num = len(image_grid) * self.ray_sample.RATIO
             grid_count = (grid_count > 0) * sample_num // (grid_count > 0).sum()
-            # 在所有有点的格子中均匀地采样出sample_num个点，每个格子中的点为grid_count个
         elif "density" in self.ray_sample.METHOD:
             grid_count = grid_count * self.ray_sample.RATIO
-            # 在所有有点的格子中按照密度采样出sample_num个点，每个格子中的点数与格子中的真实点数成正比
         elif "sparsity" in self.ray_sample.METHOD:
             sample_count = grid_count[grid_count > 0]
-            sample_num, sample_idx = (sample_count * self.ray_sample.RATIO).sort() #从小到大排序
-            sample_count[sample_idx] = sample_num.long().flip(0) # 反转顺序
+            sample_num, sample_idx = (sample_count * self.ray_sample.RATIO).sort()
+            sample_count[sample_idx] = sample_num.long().flip(0)
             grid_count[grid_count > 0] = sample_count
-            # 在所有有点的格子中按照稀疏程度采样出sample_num个点，每个格子中的点数与格子中的真实点数成正比
+
         if "all" in self.ray_sample.METHOD:
             grid_sample = torch.ones(grid_count.shape[0] * window_size, grid_count.shape[1] * window_size).bool().to(
                 device=image_grid.device)
         else:
             grid_sample = torch.rand(*grid_count.shape, window_size, window_size).to(device=image_grid.device)
-            grid_ratio = grid_count / (window_size ** 2)  # 每格中点的数量/格子大小 [Nx,Ny]
+            grid_ratio = grid_count / (window_size ** 2)  # 网格数/图片大小
             grid_sample = grid_sample < grid_ratio[..., None, None]
             grid_sample = grid_sample.permute(0, 2, 1, 3)
             grid_sample = grid_sample.reshape(grid_sample.shape[0] * window_size, -1)
-            # vis
-            # matplotlib.image.imsave('/home/zhanghaoming/visual/grid_sample0.png', grid_sample.int().float().detach().cpu().numpy())
-
 
         if "learnable" in self.ray_sample.METHOD:  # 可学习的采样法
             grid_prob = self.sample_blocks[layer_name](image_feat)  # sample_blocks是一个2d卷积
             # grid_mask 指图片特征经过MLP后grid_prob大于阈值的点,阈值为0.5
-            grid_mask = (grid_prob.sigmoid() > self.ray_sample.THRES).squeeze() # 对应公式(2)
+            grid_mask = (grid_prob.sigmoid() > self.ray_sample.THRES).squeeze()
+            grid_mask_npy = grid_mask.int().float().detach().cpu().numpy()
             grid_mask = grid_mask.transpose(0, 1)
-            # vis
-            # matplotlib.image.imsave('/home/zhanghaoming/visual/name_mask.png', grid_mask.int().float().detach().cpu().numpy())
+            # TODO
+            import matplotlib
+            matplotlib.image.imsave('/home/zhanghaoming/visual/name_mask.png', grid_mask_npy)
             
             # 用获得高分的grid_prob制成的的grid_mask裁减出用于生成ray的点生成grid_sample，对应公式(2)
             grid_sample[:grid_mask.shape[0], :grid_mask.shape[1]] = grid_mask & grid_sample[:grid_mask.shape[0],
                                                                                 :grid_mask.shape[1]]
-            # TODO  
-            grid_sample_true = torch.zeros_like(grid_sample) 
-            grid_sample_true[:grid_mask.shape[0], :grid_mask.shape[1]] = 1
-            grid_sample_true[:grid_mask.shape[0], :grid_mask.shape[1]] = grid_mask & grid_sample_true[:grid_mask.shape[0], :grid_mask.shape[1]]                                              
-        # vis
-        # matplotlib.image.imsave('/home/zhanghaoming/visual/grid_sample.png', grid_sample_true.int().float().detach().cpu().numpy())
         # TODO修改采样法
-        sample_encoded_mask = grid_sample_true[image_grid[:, 0], image_grid[:, 1]]
+        sample_encoded_mask = grid_sample[image_grid[:, 0], image_grid[:, 1]]
         image_grid_select = image_grid[sample_encoded_mask]
         encoded_voxel_feat_select = encoded_voxel_feat[sample_encoded_mask]
         
@@ -621,15 +810,15 @@ class VoxelFieldFusion(nn.Module):
         # MLP把通道数压缩为原来的一半（保证输出的通道与原始通道数相同）
         render_feat = render_feat * ray_prob.unsqueeze(-1)
 
-        return render_feat, ray_logit, sample_mask, ray_mask, grid_prob, sample_encoded_mask
+        return render_feat, ray_logit, sample_mask, ray_mask, grid_prob, grid_feat[ray_mask]
 
 
     """
     render_feat：图片和点融合后的特征
-    ray_logit：不加sigmoid的ray_prob
+    ray_logit：不加sigmoid的grid_prob
     sample_mask：可学习的采样法中，获得较高得分的，体素投影到图片的点的mask
     ray_mask：ray_prob(omega_j)得分较高的投影点的mask
-    ray_prob：图片特征中每个像素-点响应,对应公式三中的omega_j
+    grid_prob：图片特征中每个像素-点响应,对应公式三中的omega_j
     """
 
     def get_loss(self, ray_pred, ray_gt, ray_multi, sample_pred, sample_gt):

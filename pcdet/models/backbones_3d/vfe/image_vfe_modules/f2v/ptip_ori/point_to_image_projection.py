@@ -114,7 +114,7 @@ class Point2ImageProjection(nn.Module):
             # Project to image
             image_grid, image_depths = transform_utils.project_to_image(project=I_C, points=camera_grid, bmm=True)
             image_grid = image_grid//fuse_stride
-            return image_grid, image_depths, batch_voxel, batch_mask, point_inv
+            return image_grid, image_depths, batch_voxel, batch_mask
         # Given voxel grid    
         elif voxel_grid is not None:
             # Reshape to match dimensions
@@ -180,7 +180,7 @@ class Point2ImageProjection(nn.Module):
         batch_voxel：点的坐标
         batch_mask：每个batch中的点的被置1，作为mask
         """
-        image_grid, image_depths, batch_voxel, batch_mask, point_inv = self.transform_grid(voxel_coords=voxel_coords, 
+        image_grid, image_depths, batch_voxel, batch_mask = self.transform_grid(voxel_coords=voxel_coords, 
                                                                                 batch_dict=batch_dict,
                                                                                 layer_name=layer_name)
 
@@ -191,15 +191,11 @@ class Point2ImageProjection(nn.Module):
         image_grid[~point_mask] = 0
         image_depths[~point_mask] = 0
         batch_voxel[~point_mask] = 0
-        # TODO
-        point_inv[~point_mask] = 0
-
         projection_dict = {}
         projection_dict['image_grid'] = image_grid.long()
         projection_dict['image_depths'] = image_depths
         projection_dict['batch_voxel'] = batch_voxel.long()
         projection_dict['point_mask'] = point_mask
-        projection_dict['point_inv'] = point_inv
 
         # This is a naive version for ray contruction.
         # A more efficient verison should contruct ray from pixel to voxel.

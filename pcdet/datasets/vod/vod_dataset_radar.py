@@ -1,4 +1,5 @@
 import copy
+import pdb
 import pickle
 
 import numpy as np
@@ -10,7 +11,7 @@ from ...utils import box_utils, calibration_kitti, common_utils, object3d_kitti
 from ..dataset import DatasetTemplate
 
 
-class KittiDataset(DatasetTemplate):
+class VodDatasetRadar(DatasetTemplate):
     def __init__(self, dataset_cfg, class_names, training=True, root_path=None, logger=None):
         """
         Args:
@@ -34,7 +35,7 @@ class KittiDataset(DatasetTemplate):
 
     def include_kitti_data(self, mode):
         if self.logger is not None:
-            self.logger.info('Loading KITTI dataset')
+            self.logger.info('Loading Vod dataset')
         kitti_infos = []
 
         for info_path in self.dataset_cfg.INFO_PATH[mode]:
@@ -48,7 +49,7 @@ class KittiDataset(DatasetTemplate):
         self.kitti_infos.extend(kitti_infos)
 
         if self.logger is not None:
-            self.logger.info('Total samples for KITTI dataset: %d' % (len(kitti_infos)))
+            self.logger.info('Total samples for Vod dataset: %d' % (len(kitti_infos)))
 
     def set_split(self, split):
         super().__init__(
@@ -61,10 +62,23 @@ class KittiDataset(DatasetTemplate):
         self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
 
     def get_lidar(self, idx):
-        # lidar_file = self.root_split_path / 'velodyne' / ('%s.bin' % idx)
-        lidar_file = self.root_split_path / self.lidar_dir / ('%s.bin' % idx)
-        assert lidar_file.exists()
-        return np.fromfile(str(lidar_file), dtype=np.float32).reshape(-1, 7)
+        lidar_file = self.root_split_path / 'velodyne' / ('%s.bin' % idx)
+        assert lidar_file.exists() #TODO
+        # print("idx",idx)
+        # print(lidar_file)
+        number_of_channels = 7  # ['x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time']
+        points = np.fromfile(str(lidar_file), dtype=np.float32).reshape(-1, number_of_channels)
+
+        # replace the list values with statistical values; for x, y, z and time, use 0 and 1 as means and std to avoid normalization
+        means = [0, 0, 0, 0, 0, 0, 0]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
+        stds =  [1, 1, 1, 1, 1, 1, 1]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
+
+        #we then norm the channels
+        points = (points - means)/stds
+        # print("00000000000000")
+        # print(points)
+        return points
+        # return np.fromfile(str(lidar_file), dtype=np.float32).reshape(-1, 7)
 
     def get_image(self, idx):
         """
@@ -154,7 +168,7 @@ class KittiDataset(DatasetTemplate):
         def process_single_scene(sample_idx):
             print('%s sample_idx: %s' % (self.split, sample_idx))
             info = {}
-            pc_info = {'num_features': 4, 'lidar_idx': sample_idx}
+            pc_info = {'num_features': 5, 'lidar_idx': sample_idx}
             info['point_cloud'] = pc_info
 
             image_info = {'image_idx': sample_idx, 'image_shape': self.get_image_shape(sample_idx)}
@@ -226,7 +240,7 @@ class KittiDataset(DatasetTemplate):
         import torch
 
         database_save_path = Path(self.root_path) / ('gt_database' if split == 'train' else ('gt_database_%s' % split))
-        db_info_save_path = Path(self.root_path) / ('kitti_dbinfos_%s.pkl' % split)
+        db_info_save_path = Path(self.root_path) / ('vod_dbinfos_%s.pkl' % split)
 
         database_save_path.mkdir(parents=True, exist_ok=True)
         all_db_infos = {}
@@ -350,18 +364,44 @@ class KittiDataset(DatasetTemplate):
                                  single_pred_dict['score'][idx]), file=f)
 
         return annos
+    def print_str(value, *arg, sstream=None):
+        
+        if sstream is None:
+            sstream = sysio.StringIO()
+        sstream.truncate(0)
+        sstream.seek(0)
+        print(value, *arg, file=sstream)
+        return sstream.getvalue()
 
     def evaluation(self, det_annos, class_names, **kwargs):
         if 'annos' not in self.kitti_infos[0].keys():
             return None, {}
-
+        # if current_class is None:
+        current_class = [0, 1, 2]
         from .kitti_object_eval_python import eval as kitti_eval
 
         eval_det_annos = copy.deepcopy(det_annos)
         eval_gt_annos = [copy.deepcopy(info['annos']) for info in self.kitti_infos]
-        ap_result_str, ap_dict = kitti_eval.get_official_eval_result(eval_gt_annos, eval_det_annos, class_names)
-
-        return ap_result_str, ap_dict
+        # ap_result_str, ap_dict = kitti_eval.get_official_eval_result(eval_gt_annos, eval_det_annos, class_names)
+        evaluation_result = {}
+        evaluation_result.update(kitti_eval.get_official_eval_result(eval_gt_annos, eval_det_annos, current_class))
+        evaluation_result.update(kitti_eval.get_official_eval_result(eval_gt_annos, eval_det_annos, current_class, custom_method=3))
+        results = evaluation_result
+        print("Results: \n"
+          f"Entire annotated area: \n"
+          f"Car: {results['entire_area']['Car_3d_all']} \n"
+          f"Pedestrian: {results['entire_area']['Pedestrian_3d_all']} \n"
+          f"Cyclist: {results['entire_area']['Cyclist_3d_all']} \n"
+          f"mAP: {(results['entire_area']['Car_3d_all'] + results['entire_area']['Pedestrian_3d_all'] + results['entire_area']['Cyclist_3d_all']) / 3} \n"
+          f"mAOS: {(results['entire_area']['Car_aos_all'] + results['entire_area']['Pedestrian_aos_all'] + results['entire_area']['Cyclist_aos_all']) / 3} \n"
+          f"Driving corridor area: \n"
+          f"Car: {results['roi']['Car_3d_all']} \n"
+          f"Pedestrian: {results['roi']['Pedestrian_3d_all']} \n"
+          f"Cyclist: {results['roi']['Cyclist_3d_all']} \n"
+          f"mAP: {(results['roi']['Car_3d_all'] + results['roi']['Pedestrian_3d_all'] + results['roi']['Cyclist_3d_all']) / 3} \n"
+          f"mAOS: {(results['roi']['Car_aos_all'] + results['roi']['Pedestrian_aos_all'] + results['roi']['Cyclist_aos_all']) / 3} \n"
+          )
+        return evaluation_result
 
     def __len__(self):
         if self._merge_all_iters_to_one_epoch:
@@ -371,6 +411,7 @@ class KittiDataset(DatasetTemplate):
 
     def __getitem__(self, index):
         # index = 4
+        # print("111111111111111111")
         if self._merge_all_iters_to_one_epoch:
             index = index % len(self.kitti_infos)
 
@@ -421,26 +462,22 @@ class KittiDataset(DatasetTemplate):
 
         if "calib_matricies" in get_item_list:
             input_dict["trans_lidar_to_cam"], input_dict["trans_cam_to_img"] = kitti_utils.calib_to_matricies(calib)
-        
-        from timeit import default_timer as timer
-        tic = timer()
+
         data_dict = self.prepare_data(data_dict=input_dict)
-        tip = timer()
-        print("time222222222222222222222")
-        print(tip-tic)
 
         data_dict['image_shape'] = img_shape
+
         return data_dict
 
 
-def create_kitti_infos(dataset_cfg, class_names, data_path, save_path, workers=4):
-    dataset = KittiDataset(dataset_cfg=dataset_cfg, class_names=class_names, root_path=data_path, training=False)
+def create_vod_infos(dataset_cfg, class_names, data_path, save_path, workers=4):
+    dataset = VodDatasetRadar(dataset_cfg=dataset_cfg, class_names=class_names, root_path=data_path, training=False)
     train_split, val_split = 'train', 'val'
 
-    train_filename = save_path / ('kitti_infos_%s.pkl' % train_split)
-    val_filename = save_path / ('kitti_infos_%s.pkl' % val_split)
-    trainval_filename = save_path / 'kitti_infos_trainval.pkl'
-    test_filename = save_path / 'kitti_infos_test.pkl'
+    train_filename = save_path / ('vod_infos_%s.pkl' % train_split)
+    val_filename = save_path / ('vod_infos_%s.pkl' % val_split)
+    trainval_filename = save_path / 'vod_infos_trainval.pkl'
+    test_filename = save_path / 'vod_infos_test.pkl'
 
     print('---------------Start to generate data infos---------------')
 
@@ -448,23 +485,23 @@ def create_kitti_infos(dataset_cfg, class_names, data_path, save_path, workers=4
     kitti_infos_train = dataset.get_infos(num_workers=workers, has_label=True, count_inside_pts=True)
     with open(train_filename, 'wb') as f:
         pickle.dump(kitti_infos_train, f)
-    print('Kitti info train file is saved to %s' % train_filename)
+    print('vod info train file is saved to %s' % train_filename)
 
     dataset.set_split(val_split)
     kitti_infos_val = dataset.get_infos(num_workers=workers, has_label=True, count_inside_pts=True)
     with open(val_filename, 'wb') as f:
         pickle.dump(kitti_infos_val, f)
-    print('Kitti info val file is saved to %s' % val_filename)
+    print('vod info val file is saved to %s' % val_filename)
 
     with open(trainval_filename, 'wb') as f:
         pickle.dump(kitti_infos_train + kitti_infos_val, f)
-    print('Kitti info trainval file is saved to %s' % trainval_filename)
+    print('vod info trainval file is saved to %s' % trainval_filename)
 
     dataset.set_split('test')
     kitti_infos_test = dataset.get_infos(num_workers=workers, has_label=False, count_inside_pts=False)
     with open(test_filename, 'wb') as f:
         pickle.dump(kitti_infos_test, f)
-    print('Kitti info test file is saved to %s' % test_filename)
+    print('vod info test file is saved to %s' % test_filename)
 
     print('---------------Start create groundtruth database for data augmentation---------------')
     dataset.set_split(train_split)
@@ -475,17 +512,17 @@ def create_kitti_infos(dataset_cfg, class_names, data_path, save_path, workers=4
 
 if __name__ == '__main__':
     import sys
-    if sys.argv.__len__() > 1 and sys.argv[1] == 'create_kitti_infos':
+    import pdb
+    if sys.argv.__len__() > 1 and sys.argv[1] == 'create_vod_infos':
         import yaml
         from pathlib import Path
         from easydict import EasyDict
-        dataset_cfg = EasyDict(yaml.load(open(sys.argv[2])))
+        dataset_cfg = EasyDict(yaml.safe_load(open(sys.argv[2])))
         ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
-        create_kitti_infos(
+        # pdb.set_trace()quit
+        create_vod_infos(
             dataset_cfg=dataset_cfg,
             class_names=['Car', 'Pedestrian', 'Cyclist'],
-            # data_path=ROOT_DIR / 'data' / 'kitti',
-            # save_path=ROOT_DIR / 'data' / 'kitti'
-            data_path=ROOT_DIR / '/home/adept3090/sdb/dataset/KITTI',
-            save_path=ROOT_DIR / '/home/adept3090/sdb/dataset/KITTI' 
+            data_path=ROOT_DIR / 'data' / 'vod'/'radar_5frames',
+            save_path=ROOT_DIR / 'data' / 'vod'/'radar_5frames'
         )

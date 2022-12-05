@@ -1,5 +1,6 @@
 import glob
 import os
+from time import time
 
 import torch
 import tqdm
@@ -73,16 +74,23 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
             train_loader.dataset.merge_all_iters_to_one_epoch(merge=True, epochs=total_epochs)
             total_it_each_epoch = len(train_loader) // max(total_epochs, 1)
 
+        import time
+        print("time111111111111111111111111111")
+        start = time.time()
         dataloader_iter = iter(train_loader)
+        print(time.time() - start)
         for cur_epoch in tbar:
             if train_sampler is not None:
-                train_sampler.set_epoch(cur_epoch)
+                # TODO 单卡
+                # train_sampler.set_epoch(cur_epoch)
+                pass
 
             # train one epoch
             if lr_warmup_scheduler is not None and cur_epoch < optim_cfg.WARMUP_EPOCH:
                 cur_scheduler = lr_warmup_scheduler
             else:
                 cur_scheduler = lr_scheduler
+
             accumulated_iter = train_one_epoch(
                 model, optimizer, train_loader, model_func,
                 lr_scheduler=cur_scheduler,

@@ -1,21 +1,26 @@
 import argparse
 import datetime
 import glob
+import imp
+from operator import imod
 import os
 from pathlib import Path
 from test import repeat_eval_ckpt
+# from macpath import join
+
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from tensorboardX import SummaryWriter
-
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
 from pcdet.models import build_network, model_fn_decorator
 from pcdet.utils import common_utils
 from train_utils.optimization import build_optimizer, build_scheduler
 from train_utils.train_utils import train_model
+import warnings
+warnings.filterwarnings("ignore")
 
 
 def parse_config():
@@ -27,7 +32,7 @@ def parse_config():
     parser.add_argument('--extra_tag', type=str, default='default', help='extra tag for this experiment')
     parser.add_argument('--ckpt', type=str, default=None, help='checkpoint to start from')
     parser.add_argument('--pretrained_model', type=str, default=None, help='pretrained_model')
-    parser.add_argument('--launcher', choices=['none', 'pytorch', 'slurm'], default='none')
+    parser.add_argument('--launcher', choices=['none', 'pytorch', 'slurm'], default='pytorch')
     parser.add_argument('--tcp_port', type=int, default=18888, help='tcp port for distrbuted training')
     parser.add_argument('--sync_bn', action='store_true', default=True, help='whether to use sync bn')
     parser.add_argument('--fix_random_seed', action='store_true', default=False, help='')
@@ -46,8 +51,11 @@ def parse_config():
 
     cfg_from_yaml_file(args.cfg_file, cfg)
     cfg.TAG = Path(args.cfg_file).stem
-    cfg.EXP_GROUP_PATH = '/'.join(args.cfg_file.split('/')[1:-1])  # remove 'cfgs' and 'xxxx.yaml'
 
+
+    # mypath  = '/'.join(args.cfg_file.split('/')[1:-1])  # remove 'cfgs' and 'xxxx.yaml'
+    mypath  = 'home/zhanghaoming/projects/VFF/tools/cfgs/vod_models'
+    cfg.EXP_GROUP_PATH = mypath  # remove 'cfgs' and 'xxxx.yaml'
     if args.set_cfgs is not None:
         cfg_from_list(args.set_cfgs, cfg)
 
@@ -100,6 +108,8 @@ def main():
     tb_log = SummaryWriter(log_dir=str(output_dir / 'tensorboard')) if cfg.LOCAL_RANK == 0 else None
 
     # -----------------------create dataloader & network & optimizer---------------------------
+    from timeit import default_timer as timer
+    tic = timer()
     train_set, train_loader, train_sampler = build_dataloader(
         dataset_cfg=cfg.DATA_CONFIG,
         class_names=cfg.CLASS_NAMES,
@@ -110,6 +120,7 @@ def main():
         merge_all_iters_to_one_epoch=args.merge_all_iters_to_one_epoch,
         total_epochs=args.epochs
     )
+
 
     model = build_network(model_cfg=cfg.MODEL, num_class=len(cfg.CLASS_NAMES), dataset=train_set)
     if args.sync_bn:
@@ -150,6 +161,11 @@ def main():
     # -----------------------start training---------------------------
     logger.info('**********************Start training %s/%s(%s)**********************'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
+    # 时间结束
+    toc = timer()
+    print("total time")
+    print(toc - tic)
+
     train_model(
         model,
         optimizer,
@@ -183,7 +199,7 @@ def main():
     )
     eval_output_dir = output_dir / 'eval' / 'eval_with_train'
     eval_output_dir.mkdir(parents=True, exist_ok=True)
-    args.start_epoch = max(args.epochs - 10, 0)  # Only evaluate the last 10 epochs
+    args.start_epoch = max(args.epochs - 30, 0)  # Only evaluate the last 10 epochs
 
     repeat_eval_ckpt(
         model.module if dist_train else model,

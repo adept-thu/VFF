@@ -414,7 +414,6 @@ class VoxelImageFusionBackBone8x(nn.Module):
         self.sparse_shape = grid_size[::-1] + [1, 0, 0]
         self.fusion_layer = model_cfg.FUSION_LAYER
         self.fusion_method = model_cfg.get("FUSION_METHOD", "one_layer")
-        
         self.conv_input = spconv.SparseSequential(
             spconv.SubMConv3d(input_channels, 16, 3, padding=1, bias=False, indice_key='subm1'),
             norm_fn(16),
@@ -492,7 +491,6 @@ class VoxelImageFusionBackBone8x(nn.Module):
         """
         voxel_features, voxel_coords = batch_dict['voxel_features'], batch_dict['voxel_coords']
         batch_size = batch_dict['batch_size']
-        
         input_sp_tensor = spconv.SparseConvTensor(
             features=voxel_features,
             indices=voxel_coords.int(),

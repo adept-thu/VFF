@@ -8,12 +8,14 @@ from .dataset import DatasetTemplate
 from .kitti.kitti_dataset import KittiDataset
 from .nuscenes.nuscenes_dataset import NuScenesDataset
 from .waymo.waymo_dataset import WaymoDataset
+from .vod.vod_dataset_radar import VodDatasetRadar
 
 __all__ = {
     'DatasetTemplate': DatasetTemplate,
     'KittiDataset': KittiDataset,
     'NuScenesDataset': NuScenesDataset,
-    'WaymoDataset': WaymoDataset
+    'WaymoDataset': WaymoDataset,
+    'VodDatasetRadar':VodDatasetRadar
 }
 
 
@@ -39,7 +41,7 @@ class DistributedSampler(_DistributedSampler):
 
         return iter(indices)
 
-
+#TODO
 def build_dataloader(dataset_cfg, class_names, batch_size, dist, root_path=None, workers=4,
                      logger=None, training=True, merge_all_iters_to_one_epoch=False, total_epochs=0):
 
@@ -62,11 +64,26 @@ def build_dataloader(dataset_cfg, class_names, batch_size, dist, root_path=None,
             rank, world_size = common_utils.get_dist_info()
             sampler = DistributedSampler(dataset, world_size, rank, shuffle=False)
     else:
-        sampler = None
+        sampler = None # TODO
+        # from torch.utils.data.sampler import SequentialSampler
+        # sampler = SequentialSampler(dataset)
+    # dataloader = DataLoader(
+    #     dataset, batch_size=batch_size, pin_memory=True, num_workers=workers,
+    #     shuffle=(sampler is None) and training, collate_fn=dataset.collate_batch,
+    #     drop_last=False, sampler=sampler, timeout=0
+    # )
+    ###########
+    # TODO
+    # from torch.utils.data.sampler import SequentialSampler
+    # samplerS = SequentialSampler(dataset)
+    ###########
     dataloader = DataLoader(
         dataset, batch_size=batch_size, pin_memory=True, num_workers=workers,
-        shuffle=(sampler is None) and training, collate_fn=dataset.collate_batch,
+        shuffle=False, collate_fn=dataset.collate_batch,
         drop_last=False, sampler=sampler, timeout=0
     )
+
+    # seed=10
+    # torch.manual_seed(seed)  
 
     return dataset, dataloader, sampler

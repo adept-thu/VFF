@@ -63,6 +63,7 @@ class SegTemplate(nn.Module):
             
             # Download pretrained model if not available yet
             checkpoint_path = Path(self.pretrained_path)
+           
             if not checkpoint_path.exists():
                 checkpoint = checkpoint_path.name
                 save_dir = checkpoint_path.parent

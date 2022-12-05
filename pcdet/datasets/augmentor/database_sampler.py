@@ -134,23 +134,23 @@ class DataBaseSampler(object):
             paste_order = boxes3d[:,0].argsort()
             paste_order = paste_order[::-1]
         else:
-            paste_order = np.arange(len(boxes3d),dtype=np.int)
+            paste_order = np.arange(len(boxes3d),dtype=np.int32)
 
         if 'reverse' in img_aug_type:
             paste_order = paste_order[::-1]
 
-        paste_mask = -255 * np.ones(image.shape[:2], dtype=np.int)
-        fg_mask = np.zeros(image.shape[:2], dtype=np.int)
-        overlap_mask = np.zeros(image.shape[:2], dtype=np.int)
+        paste_mask = -255 * np.ones(image.shape[:2], dtype=np.int32)
+        fg_mask = np.zeros(image.shape[:2], dtype=np.int32)
+        overlap_mask = np.zeros(image.shape[:2], dtype=np.int32)
         points_2d, depth_2d = data_dict['calib'].lidar_to_img(data_dict['points'][:,:3])
         points_2d[:,0] = np.clip(points_2d[:,0], a_min=0, a_max=image.shape[1]-1)
         points_2d[:,1] = np.clip(points_2d[:,1], a_min=0, a_max=image.shape[0]-1)
-        points_2d = points_2d.astype(np.int)
+        points_2d = points_2d.astype(np.int32)
         for _order in paste_order:
             _box2d = boxes2d[_order]
             image[_box2d[1]:_box2d[3],_box2d[0]:_box2d[2]] = crop_feat[_order]
             overlap_mask[_box2d[1]:_box2d[3],_box2d[0]:_box2d[2]] += \
-                (paste_mask[_box2d[1]:_box2d[3],_box2d[0]:_box2d[2]] > 0).astype(np.int)
+                (paste_mask[_box2d[1]:_box2d[3],_box2d[0]:_box2d[2]] > 0).astype(np.int32)
             paste_mask[_box2d[1]:_box2d[3],_box2d[0]:_box2d[2]] = _order
 
             # foreground area of original point cloud in image plane
@@ -185,13 +185,13 @@ class DataBaseSampler(object):
         gt_boxes_mask = data_dict['gt_boxes_mask']
         gt_boxes = data_dict['gt_boxes'][gt_boxes_mask]
         gt_names = data_dict['gt_names'][gt_boxes_mask]
-        gt_number = gt_boxes_mask.sum().astype(np.int)
+        gt_number = gt_boxes_mask.sum().astype(np.int32)
         points = data_dict['points']
 
         obj_points_list, obj_index_list, crop_boxes2d = [], [], []
         # Convert sampled 3D boxes to image plane
         if self.aug_with_img:
-            gt_boxes2d = data_dict['gt_boxes2d'][gt_boxes_mask].astype(np.int)
+            gt_boxes2d = data_dict['gt_boxes2d'][gt_boxes_mask].astype(np.int32)
             gt_crops2d = [data_dict['images'][_x[1]:_x[3],_x[0]:_x[2]] for _x in gt_boxes2d]
 
         for idx, info in enumerate(total_valid_sampled_dict):
@@ -229,25 +229,25 @@ class DataBaseSampler(object):
                 sampled_gt_boxes2d[idx] = box2d[0]
 
 
-            obj_idx = idx * np.ones(len(obj_points), dtype=np.int)
+            obj_idx = idx * np.ones(len(obj_points), dtype=np.int32)
             obj_points_list.append(obj_points)
             obj_index_list.append(obj_idx)
 
             # Copy crops from images
             if self.aug_with_img:
-                img_path = self.root_path / self.sampler_cfg.IMG_ROOT_PATH / (info['image_idx']+'.png')
+                img_path = self.root_path / self.sampler_cfg.IMG_ROOT_PATH / (info['image_idx']+'.jpg')
                 raw_image = io.imread(img_path)
                 raw_image = raw_image.astype(np.float32)
                 raw_center = info['bbox'].reshape(2,2).mean(0)
-                new_box = sampled_gt_boxes2d[idx].astype(np.int)
+                new_box = sampled_gt_boxes2d[idx].astype(np.int32)
                 new_shape = np.array([new_box[2]-new_box[0], new_box[3]-new_box[1]])
-                raw_box = np.concatenate([raw_center-new_shape/2, raw_center+new_shape/2]).astype(np.int)
+                raw_box = np.concatenate([raw_center-new_shape/2, raw_center+new_shape/2]).astype(np.int32)
                 raw_box[0::2] = np.clip(raw_box[0::2], a_min=0, a_max=raw_image.shape[1])
                 raw_box[1::2] = np.clip(raw_box[1::2], a_min=0, a_max=raw_image.shape[0])
                 if (raw_box[2]-raw_box[0])!=new_shape[0] or (raw_box[3]-raw_box[1])!=new_shape[1]:
                     new_center = new_box.reshape(2,2).mean(0)
                     new_shape = np.array([raw_box[2]-raw_box[0], raw_box[3]-raw_box[1]])
-                    new_box = np.concatenate([new_center-new_shape/2, new_center+new_shape/2]).astype(np.int)
+                    new_box = np.concatenate([new_center-new_shape/2, new_center+new_shape/2]).astype(np.int32)
 
                 img_crop2d = raw_image[raw_box[1]:raw_box[3],raw_box[0]:raw_box[2]] / 255
                 crop_boxes2d.append(new_box)
@@ -261,7 +261,7 @@ class DataBaseSampler(object):
             sampled_gt_boxes[:, 0:7], extra_width=self.sampler_cfg.REMOVE_EXTRA_WIDTH
         )
         points = box_utils.remove_points_in_boxes3d(points, large_sampled_gt_boxes)
-        point_idxes = -1 * np.ones(len(points), dtype=np.int)
+        point_idxes = -1 * np.ones(len(points), dtype=np.int32)
         points = np.concatenate([points, obj_points], axis=0)
         point_idxes = np.concatenate([point_idxes, obj_points_idx], axis=0)
         gt_names = np.concatenate([gt_names, sampled_gt_names], axis=0)
@@ -312,7 +312,11 @@ class DataBaseSampler(object):
                     sampled_boxes, mv_height = self.put_boxes_on_road_planes(
                         sampled_boxes, data_dict['road_plane'], data_dict['calib']
                     )
-                    
+                # print('okokokokokok')
+                # print(data_dict)
+                # sampled_boxes, mv_height = self.put_boxes_on_road_planes(
+                #      sampled_boxes, data_dict['road_plane'], data_dict['calib']   
+                #     )
                 if self.aug_with_img:
                     boxes3d_camera = box_utils.boxes3d_lidar_to_kitti_camera(sampled_boxes, data_dict['calib'])
                     sampled_boxes2d = box_utils.boxes3d_kitti_camera_to_imageboxes(boxes3d_camera, data_dict['calib'], 
@@ -331,11 +335,14 @@ class DataBaseSampler(object):
                     sampled_boxes2d = sampled_boxes2d[valid_mask].cpu().numpy()
                     sampled_gt_boxes2d.append(sampled_boxes2d)
                 valid_sampled_dict = [sampled_dict[x] for x in valid_mask]
-                valid_sampled_boxes = sampled_boxes[valid_mask]
-                mv_height = mv_height[valid_mask]
-                
+                valid_sampled_boxes = sampled_boxes[valid_mask] 
+
+                if self.sampler_cfg.get('USE_ROAD_PLANE', False):
+                    mv_height = mv_height[valid_mask]
+                    sampled_mv_height = np.concatenate((sampled_mv_height, mv_height), axis=0)
+                # mv_height = mv_height[valid_mask]
                 existed_boxes = np.concatenate((existed_boxes, valid_sampled_boxes), axis=0)
-                sampled_mv_height = np.concatenate((sampled_mv_height, mv_height), axis=0)
+                # sampled_mv_height = np.concatenate((sampled_mv_height, mv_height), axis=0)
                 total_valid_sampled_dict.extend(valid_sampled_dict)
 
         sampled_gt_boxes = existed_boxes[gt_boxes.shape[0]:, :]

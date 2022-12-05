@@ -9,13 +9,13 @@ from skimage import io
 
 
 def get_image_index_str(img_idx):
-    return "{:06d}".format(img_idx)
+    return "{:05d}".format(img_idx)
 
 
 def get_kitti_info_path(idx,
                         prefix,
                         info_type='image_2',
-                        file_tail='.png',
+                        file_tail='.jpg',
                         training=True,
                         relative_path=True):
     img_idx_str = get_image_index_str(idx)
@@ -34,7 +34,7 @@ def get_kitti_info_path(idx,
 
 
 def get_image_path(idx, prefix, training=True, relative_path=True):
-    return get_kitti_info_path(idx, prefix, 'image_2', '.png', training,
+    return get_kitti_info_path(idx, prefix, 'image_2', '.jpg', training,
                                relative_path)
 
 

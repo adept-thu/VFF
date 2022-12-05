@@ -162,12 +162,13 @@ def init_dist_pytorch(tcp_port, local_rank, backend='nccl'):
 
     num_gpus = torch.cuda.device_count()
     torch.cuda.set_device(local_rank % num_gpus)
-    dist.init_process_group(
-        backend=backend,
-        init_method='tcp://127.0.0.1:%d' % tcp_port,
-        rank=local_rank,
-        world_size=num_gpus
-    )
+    # dist.init_process_group(
+    #     backend=backend,
+    #     init_method='tcp://127.0.0.1:%d' % tcp_port,
+    #     rank=local_rank,
+    #     world_size=num_gpus
+    # )
+    torch.distributed.init_process_group(backend='nccl',init_method='tcp://localhost:%d' % tcp_port, world_size=num_gpus, rank=local_rank)
     rank = dist.get_rank()
     return num_gpus, rank
 

@@ -1,5 +1,7 @@
+import pdb
 import pickle
 import time
+from xml.etree.ElementInclude import include
 
 import numpy as np
 import torch
@@ -119,7 +121,10 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
     )
 
     logger.info(result_str)
-    ret_dict.update(result_dict)
+    logger.info(result_dict)
+    # import pdb
+    # pdb.set_trace()
+    # ret_dict.update(result_dict)
 
     logger.info('Result is save to %s' % result_dir)
     logger.info('****************Evaluation done.*****************')

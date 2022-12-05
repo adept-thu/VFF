@@ -129,7 +129,7 @@ class DataAugmentor(object):
         random_idx = np.random.permutation(np.arange(0,len(data_dict['points'])))[:100]
         points_raw = data_dict['points'][random_idx,:3].copy()
         points2d_raw, depth_raw = data_dict['calib'].lidar_to_img(points_raw)
-        points2d_raw = points2d_raw.reshape(-1, 1, 2).astype(np.int)
+        points2d_raw = points2d_raw.reshape(-1, 1, 2).astype(np.int32)
 
         for cur_augmentor in self.data_augmentor_queue:
             data_dict = cur_augmentor(data_dict=data_dict)
@@ -137,13 +137,13 @@ class DataAugmentor(object):
                 random_idx = np.random.permutation(np.arange(0,len(data_dict['points'])))[:100]
                 points_raw = data_dict['points'][random_idx,:3].copy()
                 points2d_raw, depth_raw = data_dict['calib'].lidar_to_img(points_raw)
-                points2d_raw = points2d_raw.reshape(-1, 1, 2).astype(np.int)
+                points2d_raw = points2d_raw.reshape(-1, 1, 2).astype(np.int32)
 
         # Estimate the affine matrix according to the point transformation
         if 'aug_points' in data_dict.keys():
             points_aug = data_dict['aug_points'][random_idx,:3].copy()
             points2d_aug, depth_aug = data_dict['calib'].lidar_to_img(points_aug)
-            points2d_aug = points2d_aug.reshape(-1, 1, 2).astype(np.int)
+            points2d_aug = points2d_aug.reshape(-1, 1, 2).astype(np.int32)
             ransacReprojThreshold = 10
             images = data_dict["images"]
             H, status = cv2.findHomography(points2d_aug, points2d_raw, cv2.RANSAC, ransacReprojThreshold)
