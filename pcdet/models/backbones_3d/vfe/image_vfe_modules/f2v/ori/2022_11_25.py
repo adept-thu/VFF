@@ -380,10 +380,10 @@ class VoxelFieldFusion(nn.Module):
                 
                 输出：
                 render_feat：图片和点融合后的特征
-                ray_logit：不加sigmoid的grid_prob
+                ray_logit：不加sigmoid的ray_prob =(ray_feat * grid_feat).sum(-1) ray_feat * grid_feat并按通道相加，
                 sample_mask：可学习的采样法中，获得较高得分的，体素投影到图片的点的mask
                 ray_mask：ray_prob(omega_j)得分较高的投影点的mask
-                grid_prob：图片特征中每个像素-点响应,对应公式三中的omega_j           
+                grid_prob：图片前景概率           
                 """
                 render_feat, ray_logit, sample_mask, ray_mask, grid_prob, sample_encoded_mask = self.ray_render(ray_grid, lidar_grid,
                                                                                            image_grid[point_mask],
