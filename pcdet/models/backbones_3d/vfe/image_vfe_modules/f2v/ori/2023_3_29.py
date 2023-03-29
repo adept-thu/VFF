@@ -57,7 +57,7 @@ class VoxelFieldFusion(nn.Module):
             # MLP
             self.ray_blocks = nn.ModuleDict()
             self.img_blocks = nn.ModuleDict()
-            self.background_img_blocks = nn.ModuleDict() # 背景bocks
+            self.sample_background_blocks = nn.ModuleDict() # 背景bocks
             self.sample_blocks = nn.ModuleDict()
             self.fuse_blocks = nn.ModuleDict()
 
@@ -79,7 +79,7 @@ class VoxelFieldFusion(nn.Module):
                 # 射线、图像、可学习采样都是OrderedDict形式
                 ray_block = OrderedDict()
                 img_block = OrderedDict()
-                background_img_block = OrderedDict() # 背景bocks
+                sample_background_block = OrderedDict() # 背景bocks
                 sample_blocks = OrderedDict()
 
                 ray_in_channel, img_in_channel = 3, model_cfg.LAYER_CHANNEL[_layer]  # 只有"layer1": 16
@@ -102,15 +102,16 @@ class VoxelFieldFusion(nn.Module):
                                                                                    stride=1,
                                                                                    padding=0,
                                                                                    bias=True)
-                    background_img_block['img_{}_conv_{}'.format(_layer, _block)] = nn.Conv2d(in_channels=img_in_channel,
-                                                                                   out_channels=out_channel,
-                                                                                   kernel_size=1,
-                                                                                   stride=1,
-                                                                                   padding=0,
-                                                                                   bias=True)
                                                                                    
                     if "learnable" in self.ray_sample.METHOD:  # importance采样法
                         sample_blocks['sample_{}_conv_{}'.format(_layer, _block)] = nn.Conv2d(
+                            in_channels=img_in_channel,
+                            out_channels=out_channel if _block < self.block_num - 1 else 1,
+                            kernel_size=3,
+                            stride=1,
+                            padding=1,
+                            bias=True)
+                        sample_background_block['sample_background_{}_conv_{}'.format(_layer, _block)] = nn.Conv2d(
                             in_channels=img_in_channel,
                             out_channels=out_channel if _block < self.block_num - 1 else 1,
                             kernel_size=3,
@@ -121,11 +122,12 @@ class VoxelFieldFusion(nn.Module):
                         ray_block['ray_{}_relu_{}'.format(_layer, _block)] = nn.ReLU()
                         img_block['img_{}_bn_{}'.format(_layer, _block)] = nn.BatchNorm2d(out_channel)
                         img_block['img_{}_relu_{}'.format(_layer, _block)] = nn.ReLU()
-                        background_img_block['background_img_{}_bn_{}'.format(_layer, _block)] = nn.BatchNorm2d(out_channel)
-                        background_img_block['background_img_{}_relu_{}'.format(_layer, _block)] = nn.ReLU()
+                        
                         if "learnable" in self.ray_sample.METHOD:
                             sample_blocks['sample_{}_bn_{}'.format(_layer, _block)] = nn.BatchNorm2d(out_channel)
                             sample_blocks['sample_{}_relu_{}'.format(_layer, _block)] = nn.ReLU()
+                            sample_background_block['sample_background_{}_bn_{}'.format(_layer, _block)] = nn.BatchNorm2d(out_channel)
+                            sample_background_block['sample_background_{}_relu_{}'.format(_layer, _block)] = nn.ReLU()
                     ray_in_channel = out_channel
                     img_in_channel = out_channel
 
@@ -140,11 +142,7 @@ class VoxelFieldFusion(nn.Module):
                     nn.init.normal_(img_block[_img].weight, mean=0, std=0.01)
                     if img_block[_img].bias is not None:
                         nn.init.constant_(img_block[_img].bias, 0)
-                for _img in background_img_block:
-                    if 'relu' in _img or 'bn' in _img: continue
-                    nn.init.normal_(background_img_block[_img].weight, mean=0, std=0.01)
-                    if background_img_block[_img].bias is not None:
-                        nn.init.constant_(background_img_block[_img].bias, 0)
+                
                 if "learnable" in self.ray_sample.METHOD:
                     for _sample in sample_blocks:
                         if 'relu' in _sample or 'bn' in _sample: continue
@@ -153,10 +151,16 @@ class VoxelFieldFusion(nn.Module):
                             nn.init.constant_(sample_blocks[_sample].bias, 0)
                     self.sample_blocks[_layer] = nn.Sequential(sample_blocks)
 
+                    for _sample_background in sample_background_block:
+                        if 'relu' in _sample_background or 'bn' in _img: continue
+                        nn.init.normal_(sample_background_block[_sample_background].weight, mean=0, std=0.01)
+                        if sample_background_block[_sample_background].bias is not None:
+                        nn.init.constant_(sample_background_block[_sample_background].bias, 0)
+                    self.sample_background_blocks[_layer] = nn.Sequential(sample_background_block)
                 #  三个embeding层，都是MLP
                 self.ray_blocks[_layer] = nn.Sequential(ray_block)
                 self.img_blocks[_layer] = nn.Sequential(img_block)
-                self.background_img_blocks[_layer] = nn.Sequential(background_img_block)
+                
                 self.fuse_blocks[_layer] = nn.Sequential(nn.Linear(in_features=out_channel * 2,
                                                                    out_features=out_channel,
                                                                    bias=True),
@@ -530,118 +534,6 @@ class VoxelFieldFusion(nn.Module):
 
         return encoded_voxel, batch_dict
 
-    # def ray_render(self, ray_grid, ray_feat, image_grid, image_feat, shape, layer_name, topk_num, min_n=-1, max_n=1):
-    #     """
-    #     Args:
-    #         ray_grid:  lidar_grid投影在图片上的坐标
-    #         ray_feat: lidar 坐标
-    #         image_grid: 点投影在图片上的xy坐标
-    #         image_feat:  图片本身的特征(C, H, W), Encoded image features
-    #         shape: 图片大小
-    #         layer_name:
-    #         topk_num:
-    #         min_n:
-    #         max_n:
-
-    #     Returns:
-
-    #     """
-    #     grid_prob = None
-    #     window_size = self.ray_sample.WINDOW // self.fuse_stride[layer_name]  # self.ray_sample.WINDOW=64
-    #     # .ceil()向上取整
-    #     grid_x = torch.arange(0, ((shape[0, 0] / window_size).ceil() + 1) * window_size + 1, step=window_size)  # 网格x轴
-    #     range_x = torch.stack([grid_x[:-1], grid_x[1:] - 1]).transpose(0, 1).to(device=image_grid.device)  # 网格x轴范围
-    #     grid_y = torch.arange(0, ((shape[0, 1] / window_size).ceil() + 1) * window_size + 1, step=window_size)  # 网格y轴
-    #     range_y = torch.stack([grid_y[:-1], grid_y[1:] - 1]).transpose(0, 1).to(device=image_grid.device)  # 网格y轴范围
-    #     # 根据点投影在图片上的坐标作出mask
-    #     mask_x = (image_grid[:, 0][None, :] >= range_x[:, 0][:, None]) & \
-    #              (image_grid[:, 0][None, :] <= range_x[:, 1][:, None])  # 网格切割出的图像x轴范围
-    #     mask_y = (image_grid[:, 1][None, :] >= range_y[:, 0][:, None]) & \
-    #              (image_grid[:, 1][None, :] <= range_y[:, 1][:, None])  # 网格切割出的图像y轴范围
-    #     grid_mask = mask_x[:, None, :] & mask_y[None, :, :]
-    #     grid_count = grid_mask.sum(-1)  # 网格数
-
-    #     if "uniform" in self.ray_sample.METHOD:
-    #         sample_num = len(image_grid) * self.ray_sample.RATIO
-    #         grid_count = (grid_count > 0) * sample_num // (grid_count > 0).sum()
-    #     elif "density" in self.ray_sample.METHOD:
-    #         grid_count = grid_count * self.ray_sample.RATIO
-    #     elif "sparsity" in self.ray_sample.METHOD:
-    #         sample_count = grid_count[grid_count > 0]
-    #         sample_num, sample_idx = (sample_count * self.ray_sample.RATIO).sort()
-    #         sample_count[sample_idx] = sample_num.long().flip(0)
-    #         grid_count[grid_count > 0] = sample_count
-
-    #     if "all" in self.ray_sample.METHOD:
-    #         grid_sample = torch.ones(grid_count.shape[0] * window_size, grid_count.shape[1] * window_size).bool().to(
-    #             device=image_grid.device)
-    #     else:
-    #         grid_sample = torch.rand(*grid_count.shape, window_size, window_size).to(device=image_grid.device)
-    #         grid_ratio = grid_count / (window_size ** 2)  # 网格数/图片大小
-    #         grid_sample = grid_sample < grid_ratio[..., None, None]
-    #         grid_sample = grid_sample.permute(0, 2, 1, 3)
-    #         grid_sample = grid_sample.reshape(grid_sample.shape[0] * window_size, -1)
-
-    #     if "learnable" in self.ray_sample.METHOD:  # 可学习的采样法
-    #         grid_prob = self.sample_blocks[layer_name](image_feat)  # sample_blocks是一个2d卷积
-    #         # grid_mask 指图片特征经过MLP后grid_prob大于阈值的点,阈值为0.5
-    #         grid_mask = (grid_prob.sigmoid() > self.ray_sample.THRES).squeeze()
-    #         grid_mask_npy = grid_mask.int().float().detach().cpu().numpy()
-    #         grid_mask = grid_mask.transpose(0, 1)
-    #         # TODO
-    #         import matplotlib
-            
-    #         # 用获得高分的grid_prob制成的的grid_mask裁减出用于生成ray的点生成grid_sample，对应公式(2)
-    #         grid_sample[:grid_mask.shape[0], :grid_mask.shape[1]] = grid_mask & grid_sample[:grid_mask.shape[0],
-    #                                                                             :grid_mask.shape[1]]
-
-    #     # sample_mask指的是grid_sample中包含grid投影的点
-    #     sample_mask = grid_sample[ray_grid[:, 0], ray_grid[:, 1]]
-    #     # 从ray_grid选出用于生成ray的点
-    #     # 这些点满足以下条件：1.在图片处理中获得高分的像素 2.有点投影在这些获得高分的像素上
-    #     ray_grid = ray_grid[sample_mask]
-    #     ray_feat = ray_feat[sample_mask]
-
-    #     # Get feature embedding  利用mlp处理grid采样图片中的关键点
-    #     image_feat = self.img_blocks[layer_name](image_feat)
-    #     ray_feat = self.ray_blocks[layer_name](ray_feat)
-
-    #     # Subtract 1 since pixel indexing from [0, shape - 1]
-    #     norm_coords = ray_grid / (shape - 1) * (max_n - min_n) + min_n
-    #     norm_coords = norm_coords.reshape(1, 1, -1, 2)
-    #     # grid_feat此处定义：指的是图片正规化采样后的特征 注意是BNC形状
-    #     grid_feat = F.grid_sample(input=image_feat, grid=norm_coords, mode="bilinear", padding_mode="zeros")
-    #     grid_feat = grid_feat[0, :, 0].transpose(0, 1)  # 得到每个投影点的新特征(N,C)
-    #     ray_logit = (ray_feat * grid_feat).sum(-1)  # ray_feat * grid_feat并按通道相加，
-    #     ray_prob = ray_logit.sigmoid()  # 这里对应公式(3)
-
-    #     if self.training:
-    #         if len(ray_prob) > topk_num:
-    #             ray_topk = torch.topk(ray_prob, topk_num)[1]  # 找到得分最高的前k个ray_prob的idx
-    #             # 用前k个ray_prob的值的idx做出ray_mask
-    #             ray_mask = torch.zeros_like(ray_prob).bool()
-    #             ray_mask[ray_topk] = True
-    #         else:
-    #             ray_mask = torch.ones_like(ray_prob).bool()
-    #     else:  # test模式
-    #         ray_mask = (ray_prob > self.fuse_thres)  # 得分高于阈值的点制作成mask
-    #         if ray_mask.sum() > topk_num:  # 如果得分高于阈值的点多于设定值，进一步筛选
-    #             ray_topk = torch.topk(ray_prob, topk_num)[1]
-    #             top_mask = torch.zeros_like(ray_prob).bool()
-    #             top_mask[ray_topk] = True
-    #             ray_mask = ray_mask & top_mask
-
-    #     # 用ray_mask筛选出得分高的ray_prob的值
-    #     ray_prob = ray_prob[ray_mask]
-
-        
-    #     # 拼接lidar特征和图片特征
-    #     render_feat = torch.cat([ray_feat[ray_mask], grid_feat[ray_mask]], dim=1) #2C
-    #     render_feat = self.fuse_blocks[layer_name](render_feat)
-    #     # MLP把通道数压缩为原来的一半（保证输出的通道与原始通道数相同）
-    #     render_feat = render_feat * ray_prob.unsqueeze(-1)
-
-    #     return render_feat, ray_logit, sample_mask, ray_mask, grid_prob, grid_feat[ray_mask]
 
     def ray_render(self, ray_grid, ray_feat, image_grid, image_feat, shape, layer_name, topk_num,voxel_indices =None, encoded_voxel_feat = None, min_n=-1, max_n=1):
         """
