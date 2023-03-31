@@ -53,6 +53,7 @@ class VoxelFieldFusion(nn.Module):
             self.ray_sample = model_cfg.get('SAMPLE', {'METHOD': 'naive'})  # 'METHOD':learnable_uniform
             self.topk_ratio = model_cfg.get('TOPK_RATIO', 0.25)
             self.position_type = model_cfg.get('POSITION_TYPE', None)  # absolute
+            self.back_ratio = 0.3
 
             # MLP
             self.ray_blocks = nn.ModuleDict()
@@ -181,62 +182,6 @@ class VoxelFieldFusion(nn.Module):
         loc = torch.cat([loc_w.unsqueeze(0), loc_h.unsqueeze(0)], 0).unsqueeze(0)
         return loc
 
-    def square_distance(self, src, dst):
-        """
-        Calculate Euclid distance between each two points.
-        src^T * dst = xn * xm + yn * ym + zn * zm；
-        sum(src^2, dim=-1) = xn*xn + yn*yn + zn*zn;
-        sum(dst^2, dim=-1) = xm*xm + ym*ym + zm*zm;
-        dist = (xn - xm)^2 + (yn - ym)^2 + (zn - zm)^2
-             = sum(src**2,dim=-1)+sum(dst**2,dim=-1)-2*src^T*dst
-        Input:
-            src: source points, [B, N, C]
-            dst: target points, [B, M, C]
-        Output:
-            dist: per-point square distance, [B, N, M]
-        """
-        B, N, _ = src.shape
-        _, M, _ = dst.shape
-        dist = -2 * torch.matmul(src.float(), dst.float().permute(0, 2, 1))
-        dist += torch.sum(src.float()** 2, -1).view(B, N, 1)
-        dist += torch.sum(dst.float()** 2, -1).view(B, 1, M)
-        return dist
-
-    def knn_point(self, nsample, xyz, new_xyz):
-        """
-        Input:
-            nsample: max sample number in local region
-            xyz: all points, [B, N, C]
-            new_xyz: query points, [B, S, C]
-        Return:
-            group_idx: grouped points index, [B, S, nsample]
-        """
-        sqrdists = self.square_distance(new_xyz, xyz)
-        dist_2, group_idx = torch.topk(sqrdists, nsample, dim=-1, largest=False, sorted=False)
-        return dist_2, group_idx
-
-    def query_ball_point(self,radius, nsample, xyz, new_xyz):
-        """
-        # Input:
-        #     radius: local region radius
-        #     nsample: max sample number in local region
-        #     xyz: all points, [B, N, 3]
-        #     new_xyz: query points, [B, S, 3]
-        # Return:
-        #     group_idx: grouped points index, [B, S, nsample]
-        """
-        device = xyz.device
-        B, N, C = xyz.shape
-        _, S, _ = new_xyz.shape
-        group_idx = torch.arange(N, dtype=torch.long).to(device).view(1, 1, N).repeat([B, S, 1])
-        sqrdists = self.square_distance(new_xyz, xyz)
-        group_idx[sqrdists > radius ** 2] = N
-        group_idx = group_idx.sort(dim=-1)[0][:, :, :nsample]
-        group_first = group_idx[:, :, 0].view(B, S, 1).repeat([1, 1, nsample])
-        mask = group_idx == N
-        group_idx[mask] = group_first[mask]
-        return group_idx
-
     def index_points(self, points, idx):
         """
         Input:
@@ -256,17 +201,6 @@ class VoxelFieldFusion(nn.Module):
         batch_indices = torch.arange(B, dtype=torch.long).view(view_shape).repeat(repeat_shape)
         new_points = points[batch_indices, idx.long(), :]
         return new_points
-
-    def fill(self, k, encoded_voxel_batch, select_voxel_batch):
-        dist, neighbor_idx = self.knn_point(k, encoded_voxel_batch, select_voxel_batch)  # B,N_idx,XYZ
-        
-        grouped_encoded_voxel_for_each_render_point = self.index_points(encoded_voxel_batch,
-                                                                        neighbor_idx)  # B,N,k
-        
-        max_pos = torch.max(grouped_encoded_voxel_for_each_render_point, dim=2)[0]  # BN3
-        min_pos = torch.min(grouped_encoded_voxel_for_each_render_point, dim=2)[0]  # BN3
-
-        return max_pos, min_pos
 
 
     def fusion(self, image_feat, voxel_feat, image_grid):  # 对应公式(4)
@@ -309,7 +243,7 @@ class VoxelFieldFusion(nn.Module):
                                                batch_dict=batch_dict,
                                                layer_name=layer_name)
 
-        ray_pred, ray_gt, ray_multi, sample_pred, sample_gt = [], [], [], [], []
+        ray_pred, ray_gt, ray_multi, sample_pred, sample_gt, back_pred, back_gt = [], [], [], [], [], [], []
 
         for _idx in range(len(batch_dict['image_shape'])):  # _idx之的是batch的idx,对每个batch有
             if encoded_feat2d is None:
@@ -406,7 +340,7 @@ class VoxelFieldFusion(nn.Module):
                 ray_mask：ray_prob(omega_j)得分较高的投影点的mask
                 grid_prob：图片前景概率           
                 """
-                render_feat, ray_logit, sample_mask, ray_mask, grid_prob, sample_encoded_mask = self.ray_render(ray_grid, lidar_grid,
+                render_feat, ray_logit, sample_mask, ray_mask, grid_prob, sample_encoded_mask, back_prob, sample_back_mask = self.ray_render(ray_grid, lidar_grid,
                                                                                            image_grid[point_mask],
                                                                                            image_feat.unsqueeze(0),
                                                                                            render_shape, layer_name,
@@ -421,6 +355,8 @@ class VoxelFieldFusion(nn.Module):
                 # TODO
                 voxel_indices_select= voxel_indices[voxel_mask][sample_encoded_mask]
                 voxel_feat_select = voxel_feat[voxel_mask][sample_encoded_mask]
+                voxel_indices_drop= voxel_indices[voxel_mask][sample_back_mask]
+                voxel_feat_drop = voxel_feat[voxel_mask][sample_back_mask]
 
 ##########################TODO
                 # 这一batch中所有点的坐标(N,XYZ)         
@@ -520,6 +456,17 @@ class VoxelFieldFusion(nn.Module):
                     sample_pred.append(grid_prob)
                     sample_gt.append(grid_gt)
 
+                # 背景概率判定
+
+                if back_prob is not None:
+                    back_prob = back_prob[0]
+                    back_gt = torch.zeros_like(back_prob)
+
+                    for _box in box2d_gt:
+                        back_gt[:, _box[1]:_box[3], _box[0]:_box[2]] = 1
+                    back_pred.append(back_prob)
+                    back_gt.append(back_gt)
+
         if self.training and self.loss_cfg is not None:
             ray_pred = torch.cat(ray_pred, dim=0)
             ray_gt = torch.cat(ray_gt, dim=0)
@@ -528,7 +475,10 @@ class VoxelFieldFusion(nn.Module):
             if len(sample_pred) > 0:
                 sample_pred = torch.cat(sample_pred, dim=0)
                 sample_gt = torch.cat(sample_gt, dim=0)
-            loss_dict = self.get_loss(ray_pred, ray_gt, ray_multi, sample_pred, sample_gt)
+            if len(back_pred) > 0:
+                back_pred = torch.cat(back_pred, dim=0)
+                back_gt = torch.cat(back_gt, dim=0)
+            loss_dict = self.get_loss(ray_pred, ray_gt, ray_multi, sample_pred, sample_gt, back_pred, back_gt)
             for _key in loss_dict:
                 batch_dict[_key + '_' + layer_name] = loss_dict[_key]
 
@@ -594,26 +544,40 @@ class VoxelFieldFusion(nn.Module):
 
 
         if "learnable" in self.ray_sample.METHOD:  # 可学习的采样法
-            grid_prob = self.sample_blocks[layer_name](image_feat)  # sample_blocks是一个2d卷积
+            grid_prob = self.sample_blocks[layer_name](image_feat)  # sample_blocks是一个2d卷积              
             # grid_mask 指图片特征经过MLP后grid_prob大于阈值的点,阈值为0.5
             grid_mask = (grid_prob.sigmoid() > self.ray_sample.THRES).squeeze()
             grid_mask = grid_mask.transpose(0, 1)
+            #TODO 背景mask
+            back_prob = self.sample_background_block[layer_name](image_feat)     # TODO 加了背景判断
+            back_mask = (back_prob.sigmoid() < self.back_ratio).squeeze()
+            back_mask = back_mask.transpose(0, 1)
+
             # vis
             # matplotlib.image.imsave('/home/zhanghaoming/visual/name_mask.png', grid_mask.int().float().detach().cpu().numpy())
             
             # 用获得高分的grid_prob制成的的grid_mask裁减出用于生成ray的点生成grid_sample，对应公式(2)
             grid_sample[:grid_mask.shape[0], :grid_mask.shape[1]] = grid_mask & grid_sample[:grid_mask.shape[0],
                                                                                 :grid_mask.shape[1]]
-            # TODO  
+            # TODO 前景点筛选 
             grid_sample_true = torch.zeros_like(grid_sample) 
             grid_sample_true[:grid_mask.shape[0], :grid_mask.shape[1]] = 1
             grid_sample_true[:grid_mask.shape[0], :grid_mask.shape[1]] = grid_mask & grid_sample_true[:grid_mask.shape[0], :grid_mask.shape[1]]                                              
+            # TODO 背景点筛选 
+            grid_sample_back = torch.zeros_like(grid_sample) 
+            grid_sample_back[:back_mask.shape[0], :back_mask.shape[1]] = 1
+            grid_sample_back[:back_mask.shape[0], :back_mask.shape[1]] = back_mask & grid_sample_back[:back_mask.shape[0], :back_mask.shape[1]]                                              
+        
         # vis
         # matplotlib.image.imsave('/home/zhanghaoming/visual/grid_sample.png', grid_sample_true.int().float().detach().cpu().numpy())
-        # TODO修改采样法
+        # TODO修改采样法：前景点
         sample_encoded_mask = grid_sample_true[image_grid[:, 0], image_grid[:, 1]]
-        image_grid_select = image_grid[sample_encoded_mask]
-        encoded_voxel_feat_select = encoded_voxel_feat[sample_encoded_mask]
+        # image_grid_select = image_grid[sample_encoded_mask]
+        # encoded_voxel_feat_select = encoded_voxel_feat[sample_encoded_mask]
+        # TODO修改采样法：背景点
+        sample_back_mask = grid_sample_back[image_grid[:, 0], image_grid[:, 1]]
+        # image_grid_drop = image_grid[sample_back_mask]
+        # encoded_voxel_feat_drop = encoded_voxel_feat[sample_back_mask]
         
         # sample_mask指的是grid_sample中包含grid投影的点
         sample_mask = grid_sample[ray_grid[:, 0], ray_grid[:, 1]]
@@ -661,7 +625,7 @@ class VoxelFieldFusion(nn.Module):
         # MLP把通道数压缩为原来的一半（保证输出的通道与原始通道数相同）
         render_feat = render_feat * ray_prob.unsqueeze(-1)
 
-        return render_feat, ray_logit, sample_mask, ray_mask, grid_prob, sample_encoded_mask
+        return render_feat, ray_logit, sample_mask, ray_mask, grid_prob, sample_encoded_mask, back_prob, sample_back_mask
 
 
     """
@@ -672,7 +636,7 @@ class VoxelFieldFusion(nn.Module):
     grid_prob：图片特征中每个像素-点响应,对应公式三中的omega_j
     """
 
-    def get_loss(self, ray_pred, ray_gt, ray_multi, sample_pred, sample_gt):
+    def get_loss(self, ray_pred, ray_gt, ray_multi, sample_pred, sample_gt, back_pred, back_gt):
         loss_dict = {}
         loss_ray = self.loss_func(ray_pred[None, None, :], ray_gt[None, None, :])
         if self.loss_cfg.ARGS["reduction"] == "sum":
@@ -684,6 +648,9 @@ class VoxelFieldFusion(nn.Module):
         if len(sample_pred) > 0:
             loss_sample = self.sample_loss(sample_pred, sample_gt)
             loss_dict["sample_loss"] = self.ray_sample.WEIGHT * loss_sample
+        if len(back_pred) > 0:
+            loss_back = self.sample_loss(sample_pred, sample_gt)
+            loss_dict["back_loss"] = self.ray_sample.WEIGHT * loss_back
         return loss_dict
 
     def gaussian3D(self, voxel, grid, sigma_factor=3):
