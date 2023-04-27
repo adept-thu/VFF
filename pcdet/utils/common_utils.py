@@ -160,15 +160,32 @@ def init_dist_pytorch(tcp_port, local_rank, backend='nccl'):
     if mp.get_start_method(allow_none=True) is None:
         mp.set_start_method('spawn')
 
-    num_gpus = torch.cuda.device_count()
-    torch.cuda.set_device(local_rank % num_gpus)
+    # num_gpus = torch.cuda.device_count()
+    # torch.cuda.set_device(local_rank % num_gpus)
     # dist.init_process_group(
     #     backend=backend,
     #     init_method='tcp://127.0.0.1:%d' % tcp_port,
     #     rank=local_rank,
     #     world_size=num_gpus
     # )
-    torch.distributed.init_process_group(backend='nccl',init_method='tcp://localhost:%d' % tcp_port, world_size=num_gpus, rank=local_rank)
+    master_addr = os.environ.get('DISTRIBUTED_MASTER_HOSTS', '127.0.0.1')
+    tcp_port = os.environ.get('DISTRIBUTED_PYTORCH_PORT', '16666')
+    dist_url = f'tcp://{master_addr}:{tcp_port}'
+
+    machine_rank = int(os.environ.get('DISTRIBUTED_NODE_RANK', 0))
+    machine_num = int(os.environ.get('DISTRIBUTED_NODE_COUNT', 1))
+
+    num_gpus = torch.cuda.device_count()
+    torch.cuda.set_device(local_rank % num_gpus)
+    dist.init_process_group(backend=backend,
+                            init_method=dist_url,
+                            rank=local_rank + (machine_rank * num_gpus),
+                            world_size=num_gpus * machine_num)
+    # torch.distributed.init_process_group(
+    #     backend='nccl',
+    #     init_method='tcp://localhost:%d' % tcp_port, 
+    #     world_size=num_gpus, 
+    #     rank=local_rank)
     rank = dist.get_rank()
     return num_gpus, rank
 

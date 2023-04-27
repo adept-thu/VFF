@@ -41,7 +41,7 @@ def project_to_image(project, points, bmm=False):
         project = torch.repeat_interleave(project, repeats=points.shape[0] // project.shape[0], dim=0)
         points_t = torch.bmm(points, project)
         points_t = points_t.reshape(*raw_shape[:-1], 3)
-        points_depth = points_t[..., -1] - raw_project[..., 2, 3]
+        points_depth = points_t[..., -1] - raw_project[..., 2, 3].unsqueeze(dim=1)
     points_img = convert_points_from_homogeneous(points_t)
     
     return points_img, points_depth
