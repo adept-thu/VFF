@@ -1,0 +1,30 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: 当前文件",
+            "type": "python",
+            "request": "launch",
+            "cwd": "/nfs/volume-382-110/zhangguoxin_i/vff-vod/tools",
+            "program": "train_debug.py",
+            // "program": "/home/luban/anaconda3/envs/myenv/lib/python3.8/site-packages/torch/distributed/launch.py",
+            "console": "integratedTerminal",
+            "args": [
+            "--launcher", 
+            "none",   
+            "--cfg_file",
+            "/nfs/volume-382-110/zhangguoxin_i/vff-vod/tools/cfgs/vod_models/VFF_PVRCNN.yaml",
+            "--extra_tag",
+            "debug1",
+            "--tcp_port",
+            "25498",
+        ],
+            "python": "/home/luban/anaconda3/envs/myenv/bin/python",
+            "justMyCode": true
+        }
+    ]
+}
+
