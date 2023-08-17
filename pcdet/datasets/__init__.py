@@ -9,13 +9,15 @@ from .kitti.kitti_dataset import KittiDataset
 from .nuscenes.nuscenes_dataset import NuScenesDataset
 from .waymo.waymo_dataset import WaymoDataset
 from .vod.vod_dataset_radar import VodDatasetRadar
+from .tj4d.tj4d_dataset_radar import Tj4dDatasetRadar
 
 __all__ = {
     'DatasetTemplate': DatasetTemplate,
     'KittiDataset': KittiDataset,
     'NuScenesDataset': NuScenesDataset,
     'WaymoDataset': WaymoDataset,
-    'VodDatasetRadar':VodDatasetRadar
+    'VodDatasetRadar':VodDatasetRadar,
+    'Tj4dDatasetRadar':Tj4dDatasetRadar,
 }
 
 

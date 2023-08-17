@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import matplotlib
+# import matplotlib
 from mmcv.ops import ball_query
 # from mmcv.ops import knn
 
@@ -138,7 +138,7 @@ class VoxelFieldFusion(nn.Module):
                     if 'relu' in _pos or 'bn' in _pos: continue
                     nn.init.normal_(pos_block[_pos].weight, mean=0, std=0.01)
                     if pos_block[_pos].bias is not None:
-                        nn.init.constant_(pos_block[_ray].bias, 0)                
+                        nn.init.constant_(pos_block[_pos].bias, 0)                
                 for _img in img_block:
                     if 'relu' in _img or 'bn' in _img: continue
                     nn.init.normal_(img_block[_img].weight, mean=0, std=0.01)
@@ -156,6 +156,7 @@ class VoxelFieldFusion(nn.Module):
                 self.ray_blocks[_layer] = nn.Sequential(ray_block)
                 self.pos_blocks[_layer] = nn.Sequential(pos_block)
                 self.img_blocks[_layer] = nn.Sequential(img_block)
+                self.img_weight_blocks[_layer] = nn.Sequential(img_weight_block)
                 self.fuse_blocks[_layer] = nn.Sequential(nn.Linear(in_features=out_channel * 2,
                                                                    out_features=out_channel,
                                                                    bias=True),
@@ -277,7 +278,7 @@ class VoxelFieldFusion(nn.Module):
             if encoded_feat2d is None:
                 image_feat = batch_dict['image_features'][_idx]
             else:
-                image_feat = encoded_feat2d[_idx]
+                image_feat = encoded_feat2d[_idx] # 这个是之前ffn得到的deeplabv3的layer1的深度特征信息
             # TODO                
             # image_feat_npy = image_feat[0,:,:].detach().cpu().numpy()
             # import matplotlib
@@ -386,7 +387,6 @@ class VoxelFieldFusion(nn.Module):
                 voxel_indices_select= voxel_indices[voxel_mask][sample_encoded_mask]
                 voxel_feat_select = voxel_feat[voxel_mask][sample_encoded_mask]
 
-##########################TODO
                 # 这一batch中所有点的坐标(N,XYZ)         
                 layer_spacific_k = self.k //self.fuse_stride[layer_name]
                 layer_spacific_r = self.r //self.fuse_stride[layer_name]
@@ -400,7 +400,7 @@ class VoxelFieldFusion(nn.Module):
                     render_feat = voxel_feat_select.repeat(1,layer_spacific_k,1).reshape(-1,render_feat.size(-1))
                     # render_feat = (voxel_feat_select.repeat(1,k,1) *   
                     #                 (self.index_points(render_feat.unsqueeze(0),ball_index).squeeze(0))).reshape(-1,render_feat.size(-1))
-##########################
+
 
                 render_mask = judge_voxel[render_indices[:, 0], render_indices[:, 1], render_indices[:, 2]].bool()
                 judge_voxel = judge_voxel * 0
@@ -421,7 +421,7 @@ class VoxelFieldFusion(nn.Module):
                 # np.savetxt('/home/zhanghaoming/visual/np_encoded_voxel.txt', voxel_indices.cpu().numpy())
                 # np.savetxt('/home/zhanghaoming/visual/np_foreground_voxel.txt',voxel_indices_select.cpu().numpy())
 
-                if layer_name == 'layer1' or layer_name == 'layer2': # TODO
+                if layer_name == 'layer1': # TODO
                 # _idx之的是batch的idx 
                     if render_indices.size(0) !=0 and voxel_indices_select.size(0) !=0:  
                         render_batch = _idx * torch.ones(len(render_indices), 1).to(device=render_indices.device).int()
@@ -517,6 +517,11 @@ class VoxelFieldFusion(nn.Module):
             max_n:
 
         Returns:
+            render_feat：图片和点融合后的特征
+            ray_logit：不加sigmoid的ray_prob
+            sample_mask：可学习的采样法中，获得较高得分的，体素投影到图片的点的mask
+            ray_mask：ray_prob(omega_j)得分较高的投影点的mask
+            ray_prob：图片特征中每个像素-点响应,对应公式三中的omega_j
 
         """
         # 把图片划分成若干个windows（如64*64），在每个windows里取一定数量的点
@@ -632,13 +637,7 @@ class VoxelFieldFusion(nn.Module):
         return render_feat, ray_logit, sample_mask, ray_mask, grid_prob, sample_encoded_mask
 
 
-    """
-    render_feat：图片和点融合后的特征
-    ray_logit：不加sigmoid的ray_prob
-    sample_mask：可学习的采样法中，获得较高得分的，体素投影到图片的点的mask
-    ray_mask：ray_prob(omega_j)得分较高的投影点的mask
-    ray_prob：图片特征中每个像素-点响应,对应公式三中的omega_j
-    """
+    
 
     def get_loss(self, ray_pred, ray_gt, ray_multi, sample_pred, sample_gt):
         loss_dict = {}

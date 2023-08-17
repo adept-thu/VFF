@@ -5,8 +5,8 @@
 # mount | grep s3_common_dataset
 
 
-source ~/anaconda3/etc/profile.d/conda.sh
-conda activate myenv
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vff
 cd $(dirname $0)/..
 
 set -x

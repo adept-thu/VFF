@@ -1,9 +1,8 @@
 CLASS_NAMES: ['Car', 'Pedestrian', 'Cyclist']
 
 DATA_CONFIG:
-    _BASE_CONFIG_: /ai/volume/vff-vod/tools/cfgs/dataset_configs/vod_dataset_radar.yaml
+    _BASE_CONFIG_: /ai/volume/vff-vod/tools/cfgs/dataset_configs/tj4d_dataset_radar.yaml
     GET_ITEM_LIST: ["images", "points", "calib_matricies", "gt_boxes2d"]
-    POINT_CLOUD_RANGE: [0, -25.6, -3, 51.2, 25.6, 1]
     DATA_AUGMENTOR:
         DISABLE_AUG_LIST: ['random_world_rotation', 'gt_sampling']
         IMAGE_AUG: ['flip', 'rescale'] # must keep the order with AUG_CONFIG_LIST
@@ -48,7 +47,7 @@ MODEL:
         NAME: ImagePointVFE
         BACKBONE_3D:
             NAME: VoxelImageFusionBackBone8x
-            NUM_POINT_FEATURES: 7
+            NUM_POINT_FEATURES: 8
             FUSION_LAYER: ["x_conv1","x_conv3"]
             FUSION_METHOD: layer_by_layer
         FFN:
@@ -118,7 +117,7 @@ MODEL:
 
     MAP_TO_BEV:
         NAME: HeightCompression
-        NUM_BEV_FEATURES: 256
+        NUM_BEV_FEATURES: 128
 
     BACKBONE_2D:
         NAME: BaseBEVBackbone
